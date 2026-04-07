@@ -1,0 +1,20 @@
+---
+description: Guardrails for simulation and data correctness
+globs:
+  - "crates/trendlab-core/**"
+  - "crates/trendlab-data/**"
+  - "docs/MathContract.md"
+  - "docs/BarSemantics.md"
+  - "docs/Invariants.md"
+alwaysApply: false
+---
+
+# Backtest Safety Rules
+
+- Read the math and bar-semantics contracts before changing kernel behavior.
+- Normalize provider data into `trendlab-core` market types before simulation.
+- Do not use provider-native types in core simulation code.
+- Fills use raw tradable prices unless the contract changes explicitly.
+- Do not allow same-bar trailing-stop tightening under the default rules.
+- Prefer conservative handling when a daily bar is ambiguous.
+- Preserve replayable ledgers and explicit reason codes.

@@ -1,0 +1,16 @@
+[package]
+name = "trendlab-tui"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+publish = false
+
+[dependencies]
+crossterm = "0.28.1"
+instability = "=0.3.10"
+ratatui = "0.28.1"
+trendlab-artifact = { path = "../trendlab-artifact" }
+trendlab-data = { path = "../trendlab-data" }
+
+[dev-dependencies]
+trendlab-core = { path = "../trendlab-core" }

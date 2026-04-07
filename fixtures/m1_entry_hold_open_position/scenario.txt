@@ -1,0 +1,7 @@
+name=m1_entry_hold_open_position
+symbol=TEST
+initial_cash=1000.0
+entry_shares=1
+protective_stop_fraction=0.10
+gap_policy=m1_default
+oracle=false

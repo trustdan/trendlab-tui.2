@@ -1,0 +1,4 @@
+date,raw_open,raw_high,raw_low,raw_close,analysis_close,position_shares,signal_output,filter_outcome,pending_order_state,fill_price,prior_stop,next_stop,cash,equity,reason_codes
+2025-01-02,100.0,101.0,99.0,100.5,100.5,0,queue_market_entry,pass,queue_market_entry:1,,,,1000.0,1000.0,entry_intent_queued
+2025-01-03,102.0,104.0,101.0,103.5,103.5,1,none,not_checked,none,102.0,,91.8,898.0,1001.5,entry_filled_at_open|protective_stop_set
+2025-01-06,90.0,91.0,89.0,90.5,90.5,0,none,not_checked,none,90.0,91.8,,988.0,988.0,protective_stop_hit_gap_open

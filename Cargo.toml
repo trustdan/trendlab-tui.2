@@ -1,0 +1,11 @@
+[workspace]
+members = [
+    "xtask",
+    "crates/trendlab-core",
+    "crates/trendlab-artifact",
+    "crates/trendlab-data",
+    "crates/trendlab-cli",
+    "crates/trendlab-tui",
+    "crates/trendlab-testkit",
+]
+resolver = "2"

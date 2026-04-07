@@ -1,0 +1,16 @@
+# TrendLab repo-local Codex overrides.
+# This file is intended to narrow behavior for this repository without
+# changing the user's global Codex defaults.
+
+model = "gpt-5.4"
+personality = "pragmatic"
+model_reasoning_effort = "high"
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+
+[mcp_servers.openaiDeveloperDocs]
+url = "https://developers.openai.com/mcp"
+
+[mcp_servers.context7]
+command = "npx"
+args = ["-y", "@upstash/context7-mcp"]

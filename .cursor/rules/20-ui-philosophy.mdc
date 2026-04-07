@@ -1,0 +1,14 @@
+---
+description: UI guardrails for the ratatui shell
+globs:
+  - "crates/trendlab-tui/**"
+alwaysApply: false
+---
+
+# UI Philosophy
+
+- The TUI is keyboard-first and audit-first.
+- Preserve fast navigation and terminal-native workflows.
+- Do not hide reasoning behind polished visuals.
+- Audit surfaces are first-class, not secondary dialogs.
+- UI work must not force compromises in kernel correctness.

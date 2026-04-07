@@ -1,0 +1,3 @@
+symbol,ex_date,kind,split_ratio,cash_amount
+TEST,2025-02-03,split,2.0,
+TEST,2025-02-04,cash_dividend,,0.25

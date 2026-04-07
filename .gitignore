@@ -1,0 +1,17 @@
+# Rust build artifacts
+/target/
+
+# Repo-local env and secret material
+.env
+.env.*
+!.env.example
+
+# Local editor and OS noise
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Keep repo-local agent config, but ignore any future Codex local state
+/.codex/*
+!/.codex/config.toml

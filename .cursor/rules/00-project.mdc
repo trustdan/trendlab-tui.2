@@ -1,0 +1,14 @@
+---
+description: Project-wide rules for the TrendLab rebuild
+alwaysApply: true
+---
+
+# TrendLab Project Rules
+
+- Follow `AGENTS.md` first.
+- Read `docs/Status.md` and `docs/Plan.md` before non-trivial changes.
+- Respect the milestone order: truthful lab, then CLI, then TUI shell.
+- Keep Rust workspace boundaries clean.
+- Keep diffs scoped to the active milestone.
+- Keep default validation deterministic and network-free.
+- Update `docs/Status.md` when milestone-level work changes repo state.

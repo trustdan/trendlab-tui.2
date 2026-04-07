@@ -1,0 +1,7 @@
+name=m1_intrabar_stop_exit
+symbol=TEST
+initial_cash=1000.0
+entry_shares=1
+protective_stop_fraction=0.10
+gap_policy=m1_default
+oracle=true
