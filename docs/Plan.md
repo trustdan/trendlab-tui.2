@@ -164,12 +164,12 @@ Acceptance criteria:
 
 ## Immediate Next Work
 
-The next implementation work should be Week 21 shared research-report ownership:
+The next implementation work should be Week 24 final M6 checkpoint and roadmap reset:
 
-1. move aggregate, walk-forward, bootstrap, and leaderboard report ownership out of CLI-local text formatting and into one shared reopenable path
-2. keep any shared research summary thin and auditable by linking back to the existing replay bundles instead of replacing them
-3. keep the Week 21 slice scoped to report ownership and reopenability only, not point-in-time universe membership or fresh statistical breadth
-4. use the re-baselined Weeks 21-24 block in `docs/Roadmap.md` as the active post-checkpoint contract for the next sessions
+1. decide whether the current M6 gate is satisfied without point-in-time universes
+2. record whether point-in-time universe support remains deferred into a later milestone or becomes the next planning horizon
+3. update backlog and define the next roadmap era from the actual post-Week-23 state
+4. use the re-baselined Weeks 21-24 block in `docs/Roadmap.md` as the active checkpoint contract for the next sessions
 
 ## Out of Scope For Early Milestones
 
@@ -186,9 +186,7 @@ The next implementation work should be Week 21 shared research-report ownership:
 - whether derived analysis series ever need their own persisted cache can be revisited after the first M2 implementation pass
 - whether the initial strategy interfaces need richer signal metadata or exit directives should be revisited during early M6 aggregation and leaderboard work
 - whether strategy-layer scenarios want a dedicated fixture/oracle harness in addition to the current unit coverage should be revisited during early M6 research-work hardening
-- whether the new CLI-local research aggregate summary should eventually move into a shared crate or persisted schema should be revisited once another surface needs the same report shape
-- whether the new CLI-local walk-forward split report should eventually move into a shared crate or persisted schema should be revisited once another surface needs to reopen identical split schedules
-- whether the new CLI-local bootstrap confidence report should eventually move into a shared crate or persisted schema should be revisited once another surface needs the same report shape
-- whether the new CLI-local separated leaderboard report should eventually move into a shared crate or persisted schema should be revisited once another surface needs the same report shape
-- whether strategy-component labels should remain standardized manifest parameters or graduate into first-class manifest fields should be revisited once the shared research-report ownership pass settles
+- whether shared research-report bundle links should normalize to relative paths or a stricter portability rule can be revisited once more than the CLI reopens them regularly
+- whether the first shared `research.json` encoding needs richer compatibility metadata should be revisited now that the Week 23 reopen hardening pass is in place
+- whether strategy-component labels should remain standardized manifest parameters or graduate into first-class manifest fields can be revisited after the Week 24 checkpoint fixes the next planning horizon
 - whether the low-level JSON `RunRequest` input used by the CLI should become a higher-level operator-facing run spec can be revisited once the first research orchestration path is concrete

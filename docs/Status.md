@@ -2,7 +2,7 @@
 
 ## Current State
 
-The Week 20 research checkpoint is complete. The current M6 stack now includes aggregate, walk-forward, bootstrap, and separated leaderboard CLI flows, point-in-time universes are explicitly deferred as not yet honest enough to schedule, and the next active step is Week 21 shared research-report ownership.
+Week 23 provenance and compatibility hardening is complete. The current M6 stack now includes shared reopenable aggregate, walk-forward, bootstrap, and separated leaderboard research reports plus a CLI `research explain` path that revalidates linked replay bundles, rejects malformed or under-attributed reopen inputs explicitly, and keeps point-in-time universes deferred as not yet honest enough to schedule. The next active step is Week 24 final M6 checkpoint and roadmap reset.
 
 ## Locked Decisions
 
@@ -169,6 +169,24 @@ The Week 20 research checkpoint is complete. The current M6 stack now includes a
 - re-baselined Weeks 21-24 in `docs/Roadmap.md` around shared research-report ownership, reopenability, and provenance hardening rather than premature point-in-time breadth
 - updated `docs/Plan.md` so Week 21 shared research-report ownership is now the active next implementation slice
 - re-verified `cargo xtask validate` after the Week 20 checkpoint doc updates
+- added shared research report types plus `research.json` load/write helpers in `trendlab-artifact` for aggregate, walk-forward, bootstrap, and leaderboard summaries
+- rewired `trendlab-cli research aggregate`, `walk-forward`, `bootstrap`, and `leaderboard` to build the shared report models and optionally persist them with `--output <dir>`
+- added deterministic artifact and CLI coverage for shared research report round-trip and reopen flows across aggregate, walk-forward, bootstrap, and leaderboard outputs
+- updated `docs/Artifacts.md` and `docs/Plan.md` so the repo contract now reflects shared research-report ownership and the Week 22 next slice
+- completed Week 21 and moved the active next step to Week 22 normalized research execution and reopen flow
+- re-verified `cargo xtask validate` after the Week 21 shared research-report changes
+- added `trendlab-cli research explain <report-dir>` so persisted `research.json` outputs reopen through the shared `trendlab-artifact` load path instead of CLI-local reconstruction
+- normalized saved research-report rendering so generated `--output` flows and reopened explain flows share the same report view across aggregate, walk-forward, bootstrap, and leaderboard outputs
+- added deterministic CLI coverage proving aggregate, walk-forward, bootstrap aggregate, bootstrap walk-forward, and leaderboard reports reopen through the shared research-report path
+- updated `docs/Plan.md` so Week 23 provenance and compatibility hardening is now the active next implementation slice
+- completed Week 22 and moved the active next step to Week 23 provenance and compatibility hardening
+- re-verified `cargo xtask validate` after the Week 22 normalized research execution and reopen changes
+- hardened `trendlab-artifact` research-report validation so aggregate totals, walk-forward split structure, bootstrap distribution shape, and leaderboard report invariants reject inconsistent `research.json` payloads on write and load
+- hardened `trendlab-cli research explain` so reopened research reports reconcile stored provenance against the linked replay bundles instead of trusting stale paths, stale manifests, or missing strategy-component attribution
+- added regression coverage for Week 23 failure paths, including missing aggregate member bundles, malformed leaderboard report payloads, and reopened leaderboard bundles missing required strategy attribution
+- updated `docs/Artifacts.md` and `docs/Plan.md` so the repo contract now reflects Week 23 provenance-safe reopen behavior and the Week 24 checkpoint handoff
+- completed Week 23 and moved the active next step to Week 24 final M6 checkpoint and roadmap reset
+- re-verified `cargo xtask validate` after the Week 23 provenance and compatibility hardening changes
 
 ## Week 0 Closure Decisions
 
@@ -245,11 +263,11 @@ The Week 20 research checkpoint is complete. The current M6 stack now includes a
 
 ## Next Planned Step
 
-Begin Week 21 shared research-report ownership:
+Begin Week 24 final M6 checkpoint and roadmap reset:
 
-1. move aggregate, walk-forward, bootstrap, and leaderboard report ownership out of CLI-local text formatting and into one shared reopenable path
-2. keep any shared research summary thin and auditable by linking back to the existing replay bundles instead of replacing them
-3. keep the Week 21 slice scoped to report ownership and reopenability only, not point-in-time universe membership or fresh statistical breadth
+1. decide whether the current M6 gate is satisfied without point-in-time universes
+2. record whether point-in-time universe support remains deferred into a later milestone or becomes the next planning horizon
+3. update the backlog and define the next roadmap era from the actual post-Week-23 state
 
 ## Setup Verification
 
@@ -275,10 +293,7 @@ Begin Week 21 shared research-report ownership:
 - the first CLI run path intentionally uses serialized core `RunRequest` inputs; a higher-level operator-facing run spec may still be needed before the CLI feels complete
 - replay-bundle data audit currently inspects persisted per-bar raw and analysis fields; if later TUI audit panels need explicit corporate-action markers inside replay artifacts, that artifact surface may need one more pass
 - the current inspect navigator derives per-trade items from the single-position replay ledger; if later M6 work introduces multi-symbol or richer trade grouping needs, that presentation model may need one more pass
-- the first research aggregate summary currently lives in CLI output rather than a shared crate or persisted schema; if later CLI and TUI research surfaces need the same report shape, ownership may need one more pass
-- the current walk-forward output is still a CLI-local orchestration report over existing bundles rather than a persisted research artifact; if later surfaces need to reopen identical split schedules, that ownership may need one more pass
-- the current bootstrap confidence output is also CLI-local rather than a persisted shared research artifact; if later CLI and TUI surfaces need to reopen identical confidence summaries, that ownership may need one more pass
-- the current separated leaderboard output is also CLI-local rather than a persisted shared research artifact; if later CLI and TUI surfaces need to reopen identical leaderboard summaries, that ownership may need one more pass
+- shared research-report bundle links currently preserve the explicit replay-bundle paths supplied to the CLI; if later surfaces need stronger portability or path-normalization rules, that contract may need one more pass
 - point-in-time universes are now explicitly deferred; the repo still lacks an honest universe snapshot representation and historical membership path for research runs
-- strategy-component attribution currently rides in standardized manifest parameters; if shared research-report ownership needs richer typing or compatibility rules, that contract may need one more pass
+- strategy-component attribution currently rides in standardized manifest parameters; Week 23 proves that is sufficient for current reopen and ranking checks, but older-bundle compatibility or richer later audit surfaces may still justify first-class manifest fields
 - repo-local `.codex/config.toml` is in place, but this Codex CLI build did not surface the repo-local MCP servers via `codex mcp list`; Cursor/IDE trusted-project behavior still needs manual confirmation

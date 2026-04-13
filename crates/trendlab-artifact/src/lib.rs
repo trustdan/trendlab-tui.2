@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::fs::{self, File};
@@ -18,6 +19,7 @@ pub const BUNDLE_FILE_NAME: &str = "bundle.json";
 pub const MANIFEST_FILE_NAME: &str = "manifest.json";
 pub const SUMMARY_FILE_NAME: &str = "summary.json";
 pub const LEDGER_FILE_NAME: &str = "ledger.jsonl";
+pub const RESEARCH_REPORT_FILE_NAME: &str = "research.json";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BundleDescriptor {
@@ -98,6 +100,201 @@ pub struct ReplayBundle {
     pub manifest: RunManifest,
     pub summary: RunSummary,
     pub ledger: Vec<PersistedLedgerRow>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResearchAggregateMember {
+    pub symbol: String,
+    pub bundle_path: PathBuf,
+    pub row_count: usize,
+    pub warning_count: usize,
+    pub trade_count: usize,
+    pub starting_equity: String,
+    pub ending_equity: String,
+    pub net_equity_change: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResearchAggregateReport {
+    pub engine_version: String,
+    pub snapshot_id: String,
+    pub provider_identity: String,
+    pub date_range: String,
+    pub gap_policy: String,
+    pub historical_limitations: String,
+    pub symbol_count: usize,
+    pub total_row_count: usize,
+    pub total_warning_count: usize,
+    pub total_trade_count: usize,
+    pub starting_equity_total: String,
+    pub ending_equity_total: String,
+    pub net_equity_change_total: String,
+    pub average_net_equity_change: String,
+    pub symbols: Vec<String>,
+    pub members: Vec<ResearchAggregateMember>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResearchWalkForwardSplitChild {
+    pub symbol: String,
+    pub bundle_path: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResearchWalkForwardSplit {
+    pub sequence: usize,
+    pub train_start_index: usize,
+    pub train_end_index: usize,
+    pub test_start_index: usize,
+    pub test_end_index: usize,
+    pub train_row_range: String,
+    pub train_date_range: String,
+    pub test_row_range: String,
+    pub test_date_range: String,
+    pub children: Vec<ResearchWalkForwardSplitChild>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResearchWalkForwardReport {
+    pub engine_version: String,
+    pub snapshot_id: String,
+    pub provider_identity: String,
+    pub date_range: String,
+    pub gap_policy: String,
+    pub historical_limitations: String,
+    pub symbols: Vec<String>,
+    pub train_bars: usize,
+    pub test_bars: usize,
+    pub step_bars: usize,
+    pub split_count: usize,
+    pub splits: Vec<ResearchWalkForwardSplit>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BootstrapDistributionSummary {
+    pub seed: u64,
+    pub sample_count: usize,
+    pub resample_size: usize,
+    pub metric: String,
+    pub baseline_metric: String,
+    pub bootstrap_mean: String,
+    pub bootstrap_median: String,
+    pub bootstrap_min: String,
+    pub bootstrap_max: String,
+    pub bootstrap_interval_95_lower: String,
+    pub bootstrap_interval_95_upper: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResearchBootstrapAggregateReport {
+    pub baseline: ResearchAggregateReport,
+    pub distribution: BootstrapDistributionSummary,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResearchBootstrapWalkForwardSplit {
+    pub sequence: usize,
+    pub train_row_range: String,
+    pub train_date_range: String,
+    pub test_row_range: String,
+    pub test_date_range: String,
+    pub baseline_test_total_net_equity_change: String,
+    pub baseline_test_average_net_equity_change: String,
+    pub children: Vec<ResearchWalkForwardSplitChild>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResearchBootstrapWalkForwardReport {
+    pub baseline: ResearchWalkForwardReport,
+    pub distribution: BootstrapDistributionSummary,
+    pub splits: Vec<ResearchBootstrapWalkForwardSplit>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LeaderboardView {
+    Signal,
+    PositionManager,
+    ExecutionModel,
+    System,
+}
+
+impl LeaderboardView {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Signal => "signal",
+            Self::PositionManager => "position-manager",
+            Self::ExecutionModel => "execution-model",
+            Self::System => "system",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "signal" => Some(Self::Signal),
+            "position-manager" => Some(Self::PositionManager),
+            "execution-model" => Some(Self::ExecutionModel),
+            "system" => Some(Self::System),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResearchLeaderboardRow {
+    pub rank: usize,
+    pub label: String,
+    pub signal_id: String,
+    pub filter_id: String,
+    pub position_manager_id: String,
+    pub execution_model_id: String,
+    pub aggregate: ResearchAggregateReport,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResearchLeaderboardReport {
+    pub view: LeaderboardView,
+    pub engine_version: String,
+    pub snapshot_id: String,
+    pub provider_identity: String,
+    pub date_range: String,
+    pub gap_policy: String,
+    pub historical_limitations: String,
+    pub symbol_count: usize,
+    pub symbols: Vec<String>,
+    pub fixed_signal_id: Option<String>,
+    pub fixed_filter_id: Option<String>,
+    pub fixed_position_manager_id: Option<String>,
+    pub fixed_execution_model_id: Option<String>,
+    pub rows: Vec<ResearchLeaderboardRow>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "report", rename_all = "snake_case")]
+pub enum ResearchReport {
+    Aggregate(ResearchAggregateReport),
+    WalkForward(ResearchWalkForwardReport),
+    BootstrapAggregate(ResearchBootstrapAggregateReport),
+    BootstrapWalkForward(ResearchBootstrapWalkForwardReport),
+    Leaderboard(ResearchLeaderboardReport),
+}
+
+impl ResearchReport {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Aggregate(_) => "aggregate",
+            Self::WalkForward(_) => "walk_forward",
+            Self::BootstrapAggregate(_) => "bootstrap_aggregate",
+            Self::BootstrapWalkForward(_) => "bootstrap_walk_forward",
+            Self::Leaderboard(_) => "leaderboard",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct StoredResearchReport {
+    schema_version: u32,
+    report: ResearchReport,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -277,6 +474,834 @@ pub fn load_replay_bundle(bundle_dir: &Path) -> Result<ReplayBundle, ArtifactErr
         summary,
         ledger,
     })
+}
+
+pub fn write_research_report_bundle(
+    report_dir: &Path,
+    report: &ResearchReport,
+) -> Result<(), ArtifactError> {
+    validate_research_report(report)?;
+
+    let stored = StoredResearchReport {
+        schema_version: SCHEMA_VERSION,
+        report: report.clone(),
+    };
+
+    fs::create_dir_all(report_dir)
+        .map_err(|err| ArtifactError::io("failed to create", report_dir, &err))?;
+    write_json_pretty(
+        &report_dir.join(RESEARCH_REPORT_FILE_NAME),
+        &stored,
+        "failed to write",
+    )
+}
+
+pub fn load_research_report_bundle(report_dir: &Path) -> Result<ResearchReport, ArtifactError> {
+    let path = report_dir.join(RESEARCH_REPORT_FILE_NAME);
+    let stored: StoredResearchReport = read_json(&path, "failed to read")?;
+
+    if stored.schema_version != SCHEMA_VERSION {
+        return Err(ArtifactError::invalid(format!(
+            "unsupported research report schema version {}; expected {}",
+            stored.schema_version, SCHEMA_VERSION
+        )));
+    }
+
+    validate_research_report(&stored.report)?;
+
+    Ok(stored.report)
+}
+
+pub fn validate_research_report(report: &ResearchReport) -> Result<(), ArtifactError> {
+    match report {
+        ResearchReport::Aggregate(report) => {
+            validate_aggregate_report(report, "research aggregate")
+        }
+        ResearchReport::WalkForward(report) => {
+            validate_walk_forward_report(report, "research walk-forward")
+        }
+        ResearchReport::BootstrapAggregate(report) => {
+            validate_bootstrap_aggregate_report(report, "research bootstrap aggregate")
+        }
+        ResearchReport::BootstrapWalkForward(report) => {
+            validate_bootstrap_walk_forward_report(report, "research bootstrap walk-forward")
+        }
+        ResearchReport::Leaderboard(report) => {
+            validate_leaderboard_report(report, "research leaderboard")
+        }
+    }
+}
+
+fn validate_aggregate_report(
+    report: &ResearchAggregateReport,
+    context: &str,
+) -> Result<(), ArtifactError> {
+    validate_common_report_fields(
+        context,
+        &report.engine_version,
+        &report.snapshot_id,
+        &report.provider_identity,
+        &report.date_range,
+        &report.gap_policy,
+        &report.historical_limitations,
+    )?;
+
+    if report.members.is_empty() {
+        return Err(ArtifactError::invalid(format!(
+            "{context} must contain at least one member"
+        )));
+    }
+
+    if report.symbol_count != report.members.len() {
+        return Err(ArtifactError::invalid(format!(
+            "{context} symbol_count {} does not match member count {}",
+            report.symbol_count,
+            report.members.len()
+        )));
+    }
+
+    if report.symbol_count != report.symbols.len() {
+        return Err(ArtifactError::invalid(format!(
+            "{context} symbol_count {} does not match symbols length {}",
+            report.symbol_count,
+            report.symbols.len()
+        )));
+    }
+
+    let mut seen_symbols = BTreeSet::new();
+    let mut total_starting_equity = 0.0_f64;
+    let mut total_ending_equity = 0.0_f64;
+    let mut total_trade_count = 0_usize;
+    let mut total_warning_count = 0_usize;
+    let mut total_row_count = 0_usize;
+
+    for (index, member) in report.members.iter().enumerate() {
+        validate_non_empty_text(&format!("{context} member[{index}].symbol"), &member.symbol)?;
+        validate_non_empty_path(
+            &format!("{context} member[{index}].bundle_path"),
+            &member.bundle_path,
+        )?;
+
+        if !seen_symbols.insert(member.symbol.as_str()) {
+            return Err(ArtifactError::invalid(format!(
+                "{context} contains duplicate member symbol `{}`",
+                member.symbol
+            )));
+        }
+
+        if report.symbols.get(index) != Some(&member.symbol) {
+            return Err(ArtifactError::invalid(format!(
+                "{context} symbols[{index}] does not match member symbol `{}`",
+                member.symbol
+            )));
+        }
+
+        let starting_equity = parse_report_f64(
+            &format!("{context} member[{index}].starting_equity"),
+            &member.starting_equity,
+        )?;
+        let ending_equity = parse_report_f64(
+            &format!("{context} member[{index}].ending_equity"),
+            &member.ending_equity,
+        )?;
+        let net_equity_change = parse_report_f64(
+            &format!("{context} member[{index}].net_equity_change"),
+            &member.net_equity_change,
+        )?;
+        let expected_change = ending_equity - starting_equity;
+
+        if round4(net_equity_change) != round4(expected_change) {
+            return Err(ArtifactError::invalid(format!(
+                "{context} member[{index}] net_equity_change {} does not match ending minus starting {}",
+                member.net_equity_change,
+                format_signed_decimal(expected_change)
+            )));
+        }
+
+        total_starting_equity += starting_equity;
+        total_ending_equity += ending_equity;
+        total_trade_count += member.trade_count;
+        total_warning_count += member.warning_count;
+        total_row_count += member.row_count;
+    }
+
+    let total_net_equity_change = total_ending_equity - total_starting_equity;
+    let average_net_equity_change = total_net_equity_change / report.members.len() as f64;
+
+    validate_report_usize(
+        &format!("{context} total_row_count"),
+        report.total_row_count,
+        total_row_count,
+    )?;
+    validate_report_usize(
+        &format!("{context} total_warning_count"),
+        report.total_warning_count,
+        total_warning_count,
+    )?;
+    validate_report_usize(
+        &format!("{context} total_trade_count"),
+        report.total_trade_count,
+        total_trade_count,
+    )?;
+    validate_report_f64_value(
+        &format!("{context} starting_equity_total"),
+        &report.starting_equity_total,
+        total_starting_equity,
+    )?;
+    validate_report_f64_value(
+        &format!("{context} ending_equity_total"),
+        &report.ending_equity_total,
+        total_ending_equity,
+    )?;
+    validate_report_f64_value(
+        &format!("{context} net_equity_change_total"),
+        &report.net_equity_change_total,
+        total_net_equity_change,
+    )?;
+    validate_report_f64_value(
+        &format!("{context} average_net_equity_change"),
+        &report.average_net_equity_change,
+        average_net_equity_change,
+    )?;
+
+    Ok(())
+}
+
+fn validate_walk_forward_report(
+    report: &ResearchWalkForwardReport,
+    context: &str,
+) -> Result<(), ArtifactError> {
+    validate_common_report_fields(
+        context,
+        &report.engine_version,
+        &report.snapshot_id,
+        &report.provider_identity,
+        &report.date_range,
+        &report.gap_policy,
+        &report.historical_limitations,
+    )?;
+
+    if report.symbols.is_empty() {
+        return Err(ArtifactError::invalid(format!(
+            "{context} must contain at least one symbol"
+        )));
+    }
+
+    let mut seen_symbols = BTreeSet::new();
+    for symbol in &report.symbols {
+        validate_non_empty_text(&format!("{context} symbol"), symbol)?;
+        if !seen_symbols.insert(symbol.as_str()) {
+            return Err(ArtifactError::invalid(format!(
+                "{context} contains duplicate symbol `{symbol}`"
+            )));
+        }
+    }
+
+    if report.train_bars == 0 || report.test_bars == 0 || report.step_bars == 0 {
+        return Err(ArtifactError::invalid(format!(
+            "{context} requires train_bars, test_bars, and step_bars to be greater than zero"
+        )));
+    }
+
+    if report.splits.is_empty() {
+        return Err(ArtifactError::invalid(format!(
+            "{context} must contain at least one split"
+        )));
+    }
+
+    validate_report_usize(
+        &format!("{context} split_count"),
+        report.split_count,
+        report.splits.len(),
+    )?;
+
+    for (index, split) in report.splits.iter().enumerate() {
+        let split_context = format!("{context} split[{}]", index + 1);
+        validate_report_usize(
+            &format!("{split_context} sequence"),
+            split.sequence,
+            index + 1,
+        )?;
+
+        if split.train_start_index > split.train_end_index {
+            return Err(ArtifactError::invalid(format!(
+                "{split_context} train_start_index {} must be <= train_end_index {}",
+                split.train_start_index, split.train_end_index
+            )));
+        }
+
+        if split.test_start_index > split.test_end_index {
+            return Err(ArtifactError::invalid(format!(
+                "{split_context} test_start_index {} must be <= test_end_index {}",
+                split.test_start_index, split.test_end_index
+            )));
+        }
+
+        if split.train_end_index >= split.test_start_index {
+            return Err(ArtifactError::invalid(format!(
+                "{split_context} train_end_index {} must be < test_start_index {}",
+                split.train_end_index, split.test_start_index
+            )));
+        }
+
+        validate_non_empty_text(
+            &format!("{split_context} train_date_range"),
+            &split.train_date_range,
+        )?;
+        validate_non_empty_text(
+            &format!("{split_context} test_date_range"),
+            &split.test_date_range,
+        )?;
+
+        let expected_train_row_range =
+            format!("{}..{}", split.train_start_index, split.train_end_index);
+        let expected_test_row_range =
+            format!("{}..{}", split.test_start_index, split.test_end_index);
+        validate_exact_text(
+            &format!("{split_context} train_row_range"),
+            &split.train_row_range,
+            &expected_train_row_range,
+        )?;
+        validate_exact_text(
+            &format!("{split_context} test_row_range"),
+            &split.test_row_range,
+            &expected_test_row_range,
+        )?;
+
+        validate_split_children(&split_context, &report.symbols, &split.children)?;
+    }
+
+    Ok(())
+}
+
+fn validate_bootstrap_aggregate_report(
+    report: &ResearchBootstrapAggregateReport,
+    context: &str,
+) -> Result<(), ArtifactError> {
+    validate_aggregate_report(&report.baseline, &format!("{context} baseline"))?;
+    validate_bootstrap_distribution(
+        &report.distribution,
+        &format!("{context} distribution"),
+        report.baseline.members.len(),
+    )?;
+    Ok(())
+}
+
+fn validate_bootstrap_walk_forward_report(
+    report: &ResearchBootstrapWalkForwardReport,
+    context: &str,
+) -> Result<(), ArtifactError> {
+    validate_walk_forward_report(&report.baseline, &format!("{context} baseline"))?;
+    validate_bootstrap_distribution(
+        &report.distribution,
+        &format!("{context} distribution"),
+        report.baseline.splits.len(),
+    )?;
+
+    validate_report_usize(
+        &format!("{context} splits"),
+        report.splits.len(),
+        report.baseline.splits.len(),
+    )?;
+
+    for (index, (split, baseline_split)) in report
+        .splits
+        .iter()
+        .zip(report.baseline.splits.iter())
+        .enumerate()
+    {
+        let split_context = format!("{context} split[{}]", index + 1);
+        validate_report_usize(
+            &format!("{split_context} sequence"),
+            split.sequence,
+            baseline_split.sequence,
+        )?;
+        validate_exact_text(
+            &format!("{split_context} train_row_range"),
+            &split.train_row_range,
+            &baseline_split.train_row_range,
+        )?;
+        validate_exact_text(
+            &format!("{split_context} train_date_range"),
+            &split.train_date_range,
+            &baseline_split.train_date_range,
+        )?;
+        validate_exact_text(
+            &format!("{split_context} test_row_range"),
+            &split.test_row_range,
+            &baseline_split.test_row_range,
+        )?;
+        validate_exact_text(
+            &format!("{split_context} test_date_range"),
+            &split.test_date_range,
+            &baseline_split.test_date_range,
+        )?;
+        validate_split_children(
+            &format!("{split_context} children"),
+            &report.baseline.symbols,
+            &split.children,
+        )?;
+        validate_exact_children(
+            &format!("{split_context} children"),
+            &split.children,
+            &baseline_split.children,
+        )?;
+        parse_report_f64(
+            &format!("{split_context} baseline_test_total_net_equity_change"),
+            &split.baseline_test_total_net_equity_change,
+        )?;
+        parse_report_f64(
+            &format!("{split_context} baseline_test_average_net_equity_change"),
+            &split.baseline_test_average_net_equity_change,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn validate_leaderboard_report(
+    report: &ResearchLeaderboardReport,
+    context: &str,
+) -> Result<(), ArtifactError> {
+    validate_common_report_fields(
+        context,
+        &report.engine_version,
+        &report.snapshot_id,
+        &report.provider_identity,
+        &report.date_range,
+        &report.gap_policy,
+        &report.historical_limitations,
+    )?;
+
+    if report.symbol_count != report.symbols.len() {
+        return Err(ArtifactError::invalid(format!(
+            "{context} symbol_count {} does not match symbols length {}",
+            report.symbol_count,
+            report.symbols.len()
+        )));
+    }
+
+    if report.rows.is_empty() {
+        return Err(ArtifactError::invalid(format!(
+            "{context} must contain at least one row"
+        )));
+    }
+
+    let mut seen_symbols = BTreeSet::new();
+    for symbol in &report.symbols {
+        validate_non_empty_text(&format!("{context} symbol"), symbol)?;
+        if !seen_symbols.insert(symbol.as_str()) {
+            return Err(ArtifactError::invalid(format!(
+                "{context} contains duplicate symbol `{symbol}`"
+            )));
+        }
+    }
+
+    match report.view {
+        LeaderboardView::Signal => {
+            validate_none_text(
+                &format!("{context} fixed_signal_id"),
+                report.fixed_signal_id.as_deref(),
+            )?;
+            validate_some_text(
+                &format!("{context} fixed_filter_id"),
+                report.fixed_filter_id.as_deref(),
+            )?;
+            validate_some_text(
+                &format!("{context} fixed_position_manager_id"),
+                report.fixed_position_manager_id.as_deref(),
+            )?;
+            validate_some_text(
+                &format!("{context} fixed_execution_model_id"),
+                report.fixed_execution_model_id.as_deref(),
+            )?;
+        }
+        LeaderboardView::PositionManager => {
+            validate_some_text(
+                &format!("{context} fixed_signal_id"),
+                report.fixed_signal_id.as_deref(),
+            )?;
+            validate_some_text(
+                &format!("{context} fixed_filter_id"),
+                report.fixed_filter_id.as_deref(),
+            )?;
+            validate_none_text(
+                &format!("{context} fixed_position_manager_id"),
+                report.fixed_position_manager_id.as_deref(),
+            )?;
+            validate_some_text(
+                &format!("{context} fixed_execution_model_id"),
+                report.fixed_execution_model_id.as_deref(),
+            )?;
+        }
+        LeaderboardView::ExecutionModel => {
+            validate_some_text(
+                &format!("{context} fixed_signal_id"),
+                report.fixed_signal_id.as_deref(),
+            )?;
+            validate_some_text(
+                &format!("{context} fixed_filter_id"),
+                report.fixed_filter_id.as_deref(),
+            )?;
+            validate_some_text(
+                &format!("{context} fixed_position_manager_id"),
+                report.fixed_position_manager_id.as_deref(),
+            )?;
+            validate_none_text(
+                &format!("{context} fixed_execution_model_id"),
+                report.fixed_execution_model_id.as_deref(),
+            )?;
+        }
+        LeaderboardView::System => {
+            validate_none_text(
+                &format!("{context} fixed_signal_id"),
+                report.fixed_signal_id.as_deref(),
+            )?;
+            validate_none_text(
+                &format!("{context} fixed_filter_id"),
+                report.fixed_filter_id.as_deref(),
+            )?;
+            validate_none_text(
+                &format!("{context} fixed_position_manager_id"),
+                report.fixed_position_manager_id.as_deref(),
+            )?;
+            validate_none_text(
+                &format!("{context} fixed_execution_model_id"),
+                report.fixed_execution_model_id.as_deref(),
+            )?;
+        }
+    }
+
+    for (index, row) in report.rows.iter().enumerate() {
+        let row_context = format!("{context} row[{}]", index + 1);
+        validate_report_usize(&format!("{row_context} rank"), row.rank, index + 1)?;
+        validate_non_empty_text(&format!("{row_context} label"), &row.label)?;
+        validate_non_empty_text(&format!("{row_context} signal_id"), &row.signal_id)?;
+        validate_non_empty_text(&format!("{row_context} filter_id"), &row.filter_id)?;
+        validate_non_empty_text(
+            &format!("{row_context} position_manager_id"),
+            &row.position_manager_id,
+        )?;
+        validate_non_empty_text(
+            &format!("{row_context} execution_model_id"),
+            &row.execution_model_id,
+        )?;
+        validate_aggregate_report(&row.aggregate, &format!("{row_context} aggregate"))?;
+        validate_exact_text(
+            &format!("{row_context} aggregate.engine_version"),
+            &row.aggregate.engine_version,
+            &report.engine_version,
+        )?;
+        validate_exact_text(
+            &format!("{row_context} aggregate.snapshot_id"),
+            &row.aggregate.snapshot_id,
+            &report.snapshot_id,
+        )?;
+        validate_exact_text(
+            &format!("{row_context} aggregate.provider_identity"),
+            &row.aggregate.provider_identity,
+            &report.provider_identity,
+        )?;
+        validate_exact_text(
+            &format!("{row_context} aggregate.date_range"),
+            &row.aggregate.date_range,
+            &report.date_range,
+        )?;
+        validate_exact_text(
+            &format!("{row_context} aggregate.gap_policy"),
+            &row.aggregate.gap_policy,
+            &report.gap_policy,
+        )?;
+        validate_exact_text(
+            &format!("{row_context} aggregate.historical_limitations"),
+            &row.aggregate.historical_limitations,
+            &report.historical_limitations,
+        )?;
+        validate_exact_vec(
+            &format!("{row_context} aggregate.symbols"),
+            &row.aggregate.symbols,
+            &report.symbols,
+        )?;
+        validate_report_usize(
+            &format!("{row_context} aggregate.symbol_count"),
+            row.aggregate.symbol_count,
+            report.symbol_count,
+        )?;
+
+        if let Some(value) = &report.fixed_signal_id {
+            validate_exact_text(&format!("{row_context} signal_id"), &row.signal_id, value)?;
+        }
+        if let Some(value) = &report.fixed_filter_id {
+            validate_exact_text(&format!("{row_context} filter_id"), &row.filter_id, value)?;
+        }
+        if let Some(value) = &report.fixed_position_manager_id {
+            validate_exact_text(
+                &format!("{row_context} position_manager_id"),
+                &row.position_manager_id,
+                value,
+            )?;
+        }
+        if let Some(value) = &report.fixed_execution_model_id {
+            validate_exact_text(
+                &format!("{row_context} execution_model_id"),
+                &row.execution_model_id,
+                value,
+            )?;
+        }
+
+        let expected_label = expected_leaderboard_label(report.view, row);
+        validate_exact_text(&format!("{row_context} label"), &row.label, &expected_label)?;
+    }
+
+    Ok(())
+}
+
+fn validate_common_report_fields(
+    context: &str,
+    engine_version: &str,
+    snapshot_id: &str,
+    provider_identity: &str,
+    date_range: &str,
+    gap_policy: &str,
+    historical_limitations: &str,
+) -> Result<(), ArtifactError> {
+    validate_non_empty_text(&format!("{context} engine_version"), engine_version)?;
+    validate_non_empty_text(&format!("{context} snapshot_id"), snapshot_id)?;
+    validate_non_empty_text(&format!("{context} provider_identity"), provider_identity)?;
+    validate_non_empty_text(&format!("{context} date_range"), date_range)?;
+    validate_non_empty_text(&format!("{context} gap_policy"), gap_policy)?;
+    validate_non_empty_text(
+        &format!("{context} historical_limitations"),
+        historical_limitations,
+    )?;
+    Ok(())
+}
+
+fn validate_split_children(
+    context: &str,
+    expected_symbols: &[String],
+    children: &[ResearchWalkForwardSplitChild],
+) -> Result<(), ArtifactError> {
+    if children.len() != expected_symbols.len() {
+        return Err(ArtifactError::invalid(format!(
+            "{context} child count {} does not match symbol count {}",
+            children.len(),
+            expected_symbols.len()
+        )));
+    }
+
+    let mut actual_symbols = Vec::with_capacity(children.len());
+    let mut seen_symbols = BTreeSet::new();
+
+    for (index, child) in children.iter().enumerate() {
+        validate_non_empty_text(&format!("{context} child[{index}].symbol"), &child.symbol)?;
+        validate_non_empty_path(
+            &format!("{context} child[{index}].bundle_path"),
+            &child.bundle_path,
+        )?;
+        if !seen_symbols.insert(child.symbol.as_str()) {
+            return Err(ArtifactError::invalid(format!(
+                "{context} contains duplicate child symbol `{}`",
+                child.symbol
+            )));
+        }
+        actual_symbols.push(child.symbol.clone());
+    }
+
+    validate_exact_vec(
+        &format!("{context} symbols"),
+        &actual_symbols,
+        expected_symbols,
+    )
+}
+
+fn validate_exact_children(
+    context: &str,
+    actual: &[ResearchWalkForwardSplitChild],
+    expected: &[ResearchWalkForwardSplitChild],
+) -> Result<(), ArtifactError> {
+    if actual.len() != expected.len() {
+        return Err(ArtifactError::invalid(format!(
+            "{context} length {} does not match expected {}",
+            actual.len(),
+            expected.len()
+        )));
+    }
+
+    for (index, (actual_child, expected_child)) in actual.iter().zip(expected.iter()).enumerate() {
+        validate_exact_text(
+            &format!("{context}[{index}].symbol"),
+            &actual_child.symbol,
+            &expected_child.symbol,
+        )?;
+        if actual_child.bundle_path != expected_child.bundle_path {
+            return Err(ArtifactError::invalid(format!(
+                "{context}[{index}].bundle_path {} does not match expected {}",
+                actual_child.bundle_path.display(),
+                expected_child.bundle_path.display()
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_bootstrap_distribution(
+    distribution: &BootstrapDistributionSummary,
+    context: &str,
+    expected_resample_size: usize,
+) -> Result<(), ArtifactError> {
+    if distribution.sample_count == 0 {
+        return Err(ArtifactError::invalid(format!(
+            "{context} sample_count must be greater than zero"
+        )));
+    }
+
+    validate_report_usize(
+        &format!("{context} resample_size"),
+        distribution.resample_size,
+        expected_resample_size,
+    )?;
+    validate_non_empty_text(&format!("{context} metric"), &distribution.metric)?;
+    parse_report_f64(
+        &format!("{context} baseline_metric"),
+        &distribution.baseline_metric,
+    )?;
+    parse_report_f64(
+        &format!("{context} bootstrap_mean"),
+        &distribution.bootstrap_mean,
+    )?;
+    parse_report_f64(
+        &format!("{context} bootstrap_median"),
+        &distribution.bootstrap_median,
+    )?;
+    parse_report_f64(
+        &format!("{context} bootstrap_min"),
+        &distribution.bootstrap_min,
+    )?;
+    parse_report_f64(
+        &format!("{context} bootstrap_max"),
+        &distribution.bootstrap_max,
+    )?;
+    parse_report_f64(
+        &format!("{context} bootstrap_interval_95_lower"),
+        &distribution.bootstrap_interval_95_lower,
+    )?;
+    parse_report_f64(
+        &format!("{context} bootstrap_interval_95_upper"),
+        &distribution.bootstrap_interval_95_upper,
+    )?;
+    Ok(())
+}
+
+fn validate_non_empty_text(field: &str, value: &str) -> Result<(), ArtifactError> {
+    if value.trim().is_empty() {
+        Err(ArtifactError::invalid(format!("{field} must not be empty")))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_non_empty_path(field: &str, value: &Path) -> Result<(), ArtifactError> {
+    if value.as_os_str().is_empty() {
+        Err(ArtifactError::invalid(format!("{field} must not be empty")))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_some_text(field: &str, value: Option<&str>) -> Result<(), ArtifactError> {
+    match value {
+        Some(value) => validate_non_empty_text(field, value),
+        None => Err(ArtifactError::invalid(format!("{field} must be present"))),
+    }
+}
+
+fn validate_none_text(field: &str, value: Option<&str>) -> Result<(), ArtifactError> {
+    if value.is_some() {
+        Err(ArtifactError::invalid(format!("{field} must be absent")))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_exact_text(field: &str, actual: &str, expected: &str) -> Result<(), ArtifactError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(ArtifactError::invalid(format!(
+            "{field} `{actual}` does not match expected `{expected}`"
+        )))
+    }
+}
+
+fn validate_exact_vec(
+    field: &str,
+    actual: &[String],
+    expected: &[String],
+) -> Result<(), ArtifactError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(ArtifactError::invalid(format!(
+            "{field} `{}` does not match expected `{}`",
+            actual.join("|"),
+            expected.join("|")
+        )))
+    }
+}
+
+fn validate_report_usize(field: &str, actual: usize, expected: usize) -> Result<(), ArtifactError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(ArtifactError::invalid(format!(
+            "{field} {actual} does not match expected {expected}"
+        )))
+    }
+}
+
+fn validate_report_f64_value(
+    field: &str,
+    actual_text: &str,
+    expected: f64,
+) -> Result<(), ArtifactError> {
+    let actual = parse_report_f64(field, actual_text)?;
+    if round4(actual) == round4(expected) {
+        Ok(())
+    } else {
+        Err(ArtifactError::invalid(format!(
+            "{field} {} does not match expected {}",
+            actual_text,
+            format_signed_decimal(expected)
+        )))
+    }
+}
+
+fn parse_report_f64(field: &str, value: &str) -> Result<f64, ArtifactError> {
+    value.parse::<f64>().map_err(|_| {
+        ArtifactError::invalid(format!("{field} `{value}` is not a valid formatted number"))
+    })
+}
+
+fn format_signed_decimal(value: f64) -> String {
+    if value >= 0.0 {
+        format!("+{value:.4}")
+    } else {
+        format!("{value:.4}")
+    }
+}
+
+fn expected_leaderboard_label(view: LeaderboardView, row: &ResearchLeaderboardRow) -> String {
+    match view {
+        LeaderboardView::Signal => row.signal_id.clone(),
+        LeaderboardView::PositionManager => row.position_manager_id.clone(),
+        LeaderboardView::ExecutionModel => row.execution_model_id.clone(),
+        LeaderboardView::System => format!(
+            "signal={} filter={} position={} execution={}",
+            row.signal_id, row.filter_id, row.position_manager_id, row.execution_model_id
+        ),
+    }
 }
 
 pub fn diff_replay_bundles(left: &ReplayBundle, right: &ReplayBundle) -> ReplayBundleDiff {
@@ -761,10 +1786,16 @@ mod tests {
     use trendlab_core::ledger::LedgerRow;
 
     use crate::{
-        BUNDLE_FILE_NAME, BundleDescriptor, DateRange, LEDGER_FILE_NAME, MANIFEST_FILE_NAME,
-        ManifestParameter, PersistedLedgerRow, ReferenceFlowDefinition, ReplayBundle, RunManifest,
-        RunSummary, SCHEMA_VERSION, SUMMARY_FILE_NAME, diff_replay_bundles, load_replay_bundle,
-        write_json_lines, write_json_pretty, write_replay_bundle,
+        BUNDLE_FILE_NAME, BootstrapDistributionSummary, BundleDescriptor, DateRange,
+        LEDGER_FILE_NAME, MANIFEST_FILE_NAME, ManifestParameter, PersistedLedgerRow,
+        RESEARCH_REPORT_FILE_NAME, ReferenceFlowDefinition, ReplayBundle, ResearchAggregateMember,
+        ResearchAggregateReport, ResearchBootstrapAggregateReport,
+        ResearchBootstrapWalkForwardReport, ResearchBootstrapWalkForwardSplit,
+        ResearchLeaderboardReport, ResearchLeaderboardRow, ResearchReport,
+        ResearchWalkForwardReport, ResearchWalkForwardSplit, ResearchWalkForwardSplitChild,
+        RunManifest, RunSummary, SCHEMA_VERSION, SUMMARY_FILE_NAME, diff_replay_bundles,
+        load_replay_bundle, load_research_report_bundle, write_json_lines, write_json_pretty,
+        write_replay_bundle, write_research_report_bundle,
     };
 
     #[test]
@@ -1058,6 +2089,104 @@ mod tests {
         assert!(!diff.is_empty());
     }
 
+    #[test]
+    fn research_reports_round_trip_on_disk() {
+        for (index, report) in sample_research_reports().into_iter().enumerate() {
+            let report_dir = test_output_dir(&format!("artifact-research-report-{index}"));
+
+            write_research_report_bundle(&report_dir, &report).unwrap();
+            let loaded = load_research_report_bundle(&report_dir).unwrap();
+
+            assert_eq!(loaded, report);
+            assert!(report_dir.join(RESEARCH_REPORT_FILE_NAME).is_file());
+
+            fs::remove_dir_all(report_dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn write_research_report_rejects_inconsistent_aggregate_totals() {
+        let report_dir = test_output_dir("artifact-research-report-invalid-aggregate");
+        let mut report = sample_research_aggregate_report();
+        report.total_trade_count = 999;
+
+        let error = write_research_report_bundle(&report_dir, &ResearchReport::Aggregate(report))
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "research aggregate total_trade_count 999 does not match expected 2"
+        );
+    }
+
+    #[test]
+    fn load_research_report_rejects_unsupported_schema_version() {
+        let report_dir = test_output_dir("artifact-research-report-schema-mismatch");
+        let stored = serde_json::json!({
+            "schema_version": SCHEMA_VERSION + 1,
+            "report": sample_research_reports()
+                .into_iter()
+                .next()
+                .expect("sample research report"),
+        });
+
+        fs::create_dir_all(&report_dir).unwrap();
+        write_json_pretty(
+            &report_dir.join(RESEARCH_REPORT_FILE_NAME),
+            &stored,
+            "failed to write",
+        )
+        .unwrap();
+
+        let error = load_research_report_bundle(&report_dir).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "unsupported research report schema version {}; expected {}",
+                SCHEMA_VERSION + 1,
+                SCHEMA_VERSION
+            )
+        );
+
+        fs::remove_dir_all(report_dir).unwrap();
+    }
+
+    #[test]
+    fn load_research_report_rejects_invalid_leaderboard_shape() {
+        let report_dir = test_output_dir("artifact-research-report-invalid-leaderboard");
+        let report = sample_research_reports()
+            .into_iter()
+            .find_map(|report| match report {
+                ResearchReport::Leaderboard(report) => Some(report),
+                _ => None,
+            })
+            .expect("sample leaderboard report");
+        let mut report = report;
+        report.fixed_signal_id = Some("should_not_be_present".to_string());
+        let stored = serde_json::json!({
+            "schema_version": SCHEMA_VERSION,
+            "report": ResearchReport::Leaderboard(report),
+        });
+
+        fs::create_dir_all(&report_dir).unwrap();
+        write_json_pretty(
+            &report_dir.join(RESEARCH_REPORT_FILE_NAME),
+            &stored,
+            "failed to write",
+        )
+        .unwrap();
+
+        let error = load_research_report_bundle(&report_dir).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "research leaderboard fixed_signal_id must be absent"
+        );
+
+        fs::remove_dir_all(report_dir).unwrap();
+    }
+
     fn sample_manifest() -> RunManifest {
         RunManifest {
             schema_version: SCHEMA_VERSION,
@@ -1085,6 +2214,173 @@ mod tests {
             seed: None,
             warnings: vec!["example_warning".to_string()],
         }
+    }
+
+    fn sample_research_reports() -> Vec<ResearchReport> {
+        let aggregate = sample_research_aggregate_report();
+        let walk_forward = sample_research_walk_forward_report();
+
+        vec![
+            ResearchReport::Aggregate(aggregate.clone()),
+            ResearchReport::WalkForward(walk_forward.clone()),
+            ResearchReport::BootstrapAggregate(ResearchBootstrapAggregateReport {
+                baseline: aggregate.clone(),
+                distribution: sample_bootstrap_aggregate_distribution(),
+            }),
+            ResearchReport::BootstrapWalkForward(ResearchBootstrapWalkForwardReport {
+                baseline: walk_forward.clone(),
+                distribution: sample_bootstrap_walk_forward_distribution(),
+                splits: vec![ResearchBootstrapWalkForwardSplit {
+                    sequence: 1,
+                    train_row_range: "0..2".to_string(),
+                    train_date_range: "2025-01-02..2025-01-06".to_string(),
+                    test_row_range: "3..4".to_string(),
+                    test_date_range: "2025-01-07..2025-01-08".to_string(),
+                    baseline_test_total_net_equity_change: "+3.0000".to_string(),
+                    baseline_test_average_net_equity_change: "+1.5000".to_string(),
+                    children: sample_split_children(),
+                }],
+            }),
+            ResearchReport::Leaderboard(ResearchLeaderboardReport {
+                view: super::LeaderboardView::Signal,
+                engine_version: "m6-reference-flow".to_string(),
+                snapshot_id: "fixture:m6_research".to_string(),
+                provider_identity: "fixture".to_string(),
+                date_range: "2025-01-02..2025-01-08".to_string(),
+                gap_policy: "m1_default".to_string(),
+                historical_limitations: "none".to_string(),
+                symbol_count: 2,
+                symbols: vec!["ALPHA".to_string(), "BETA".to_string()],
+                fixed_signal_id: None,
+                fixed_filter_id: Some("pass_filter".to_string()),
+                fixed_position_manager_id: Some("keep_position_manager".to_string()),
+                fixed_execution_model_id: Some("next_open_long".to_string()),
+                rows: vec![ResearchLeaderboardRow {
+                    rank: 1,
+                    label: "close_confirmed_breakout".to_string(),
+                    signal_id: "close_confirmed_breakout".to_string(),
+                    filter_id: "pass_filter".to_string(),
+                    position_manager_id: "keep_position_manager".to_string(),
+                    execution_model_id: "next_open_long".to_string(),
+                    aggregate,
+                }],
+            }),
+        ]
+    }
+
+    fn sample_research_aggregate_report() -> ResearchAggregateReport {
+        ResearchAggregateReport {
+            engine_version: "m6-reference-flow".to_string(),
+            snapshot_id: "fixture:m6_research".to_string(),
+            provider_identity: "fixture".to_string(),
+            date_range: "2025-01-02..2025-01-08".to_string(),
+            gap_policy: "m1_default".to_string(),
+            historical_limitations: "none".to_string(),
+            symbol_count: 2,
+            total_row_count: 10,
+            total_warning_count: 0,
+            total_trade_count: 2,
+            starting_equity_total: "2000.0000".to_string(),
+            ending_equity_total: "2003.0000".to_string(),
+            net_equity_change_total: "+3.0000".to_string(),
+            average_net_equity_change: "+1.5000".to_string(),
+            symbols: vec!["ALPHA".to_string(), "BETA".to_string()],
+            members: vec![
+                ResearchAggregateMember {
+                    symbol: "ALPHA".to_string(),
+                    bundle_path: PathBuf::from("reports/alpha-bundle"),
+                    row_count: 5,
+                    warning_count: 0,
+                    trade_count: 1,
+                    starting_equity: "1000.0000".to_string(),
+                    ending_equity: "1002.0000".to_string(),
+                    net_equity_change: "+2.0000".to_string(),
+                },
+                ResearchAggregateMember {
+                    symbol: "BETA".to_string(),
+                    bundle_path: PathBuf::from("reports/beta-bundle"),
+                    row_count: 5,
+                    warning_count: 0,
+                    trade_count: 1,
+                    starting_equity: "1000.0000".to_string(),
+                    ending_equity: "1001.0000".to_string(),
+                    net_equity_change: "+1.0000".to_string(),
+                },
+            ],
+        }
+    }
+
+    fn sample_research_walk_forward_report() -> ResearchWalkForwardReport {
+        ResearchWalkForwardReport {
+            engine_version: "m6-reference-flow".to_string(),
+            snapshot_id: "fixture:m6_research".to_string(),
+            provider_identity: "fixture".to_string(),
+            date_range: "2025-01-02..2025-01-08".to_string(),
+            gap_policy: "m1_default".to_string(),
+            historical_limitations: "none".to_string(),
+            symbols: vec!["ALPHA".to_string(), "BETA".to_string()],
+            train_bars: 3,
+            test_bars: 2,
+            step_bars: 1,
+            split_count: 1,
+            splits: vec![ResearchWalkForwardSplit {
+                sequence: 1,
+                train_start_index: 0,
+                train_end_index: 2,
+                test_start_index: 3,
+                test_end_index: 4,
+                train_row_range: "0..2".to_string(),
+                train_date_range: "2025-01-02..2025-01-06".to_string(),
+                test_row_range: "3..4".to_string(),
+                test_date_range: "2025-01-07..2025-01-08".to_string(),
+                children: sample_split_children(),
+            }],
+        }
+    }
+
+    fn sample_bootstrap_aggregate_distribution() -> BootstrapDistributionSummary {
+        BootstrapDistributionSummary {
+            seed: 7,
+            sample_count: 5,
+            resample_size: 2,
+            metric: "average_net_equity_change".to_string(),
+            baseline_metric: "+1.5000".to_string(),
+            bootstrap_mean: "+1.7000".to_string(),
+            bootstrap_median: "+1.5000".to_string(),
+            bootstrap_min: "+1.0000".to_string(),
+            bootstrap_max: "+2.5000".to_string(),
+            bootstrap_interval_95_lower: "+1.0000".to_string(),
+            bootstrap_interval_95_upper: "+2.4000".to_string(),
+        }
+    }
+
+    fn sample_bootstrap_walk_forward_distribution() -> BootstrapDistributionSummary {
+        BootstrapDistributionSummary {
+            seed: 11,
+            sample_count: 6,
+            resample_size: 1,
+            metric: "mean_split_test_average_net_equity_change".to_string(),
+            baseline_metric: "+1.5000".to_string(),
+            bootstrap_mean: "+1.6000".to_string(),
+            bootstrap_median: "+1.5000".to_string(),
+            bootstrap_min: "+1.5000".to_string(),
+            bootstrap_max: "+1.5000".to_string(),
+            bootstrap_interval_95_lower: "+1.5000".to_string(),
+            bootstrap_interval_95_upper: "+1.5000".to_string(),
+        }
+    }
+
+    fn sample_split_children() -> Vec<ResearchWalkForwardSplitChild> {
+        vec![
+            ResearchWalkForwardSplitChild {
+                symbol: "ALPHA".to_string(),
+                bundle_path: PathBuf::from("reports/alpha-bundle"),
+            },
+            ResearchWalkForwardSplitChild {
+                symbol: "BETA".to_string(),
+                bundle_path: PathBuf::from("reports/beta-bundle"),
+            },
+        ]
     }
 
     fn test_output_dir(label: &str) -> PathBuf {

@@ -16,7 +16,7 @@ This keeps:
 - `trendlab-cli` focused on commands
 - `trendlab-tui` focused on presentation
 
-Neither CLI nor TUI should become the sole owner of artifact parsing or versioning.
+Neither CLI nor TUI should become the sole owner of artifact parsing or versioning, including shared research-report persistence.
 
 ## Required Artifact Pieces
 
@@ -111,6 +111,39 @@ Rationale:
 - JSON and JSONL keep the trust surface inspectable.
 - JSONL allows streaming large ledgers without loading the whole replay into memory.
 - A directory bundle is easy for the CLI, TUI, tests, and manual inspection to share without inventing parallel parsing rules.
+
+## Research Report Bundle
+
+Aggregate, walk-forward, bootstrap, and leaderboard summaries are also shared artifacts.
+
+They must stay thin:
+
+- report-level metadata and computed summary fields
+- explicit links back to the existing replay bundles they summarize
+- no duplicated per-bar ledgers or shadow run manifests
+
+The initial shared research-report path is a directory bundle using one UTF-8 JSON file.
+
+Canonical layout:
+
+```text
+<report-dir>/
+  research.json
+```
+
+Encoding rules:
+
+- `research.json` stores the artifact schema version and one shared `ResearchReport` payload.
+- the payload kind is one of `aggregate`, `walk_forward`, `bootstrap_aggregate`, `bootstrap_walk_forward`, or `leaderboard`
+- child replay-bundle links preserve the explicit replay-bundle paths used to build the research report
+- shared research-report writes and loads validate structural invariants instead of treating `research.json` as trusted opaque text
+- reopen surfaces must reject research reports whose linked replay bundles are missing or whose replay provenance no longer reconciles honestly with the stored summary
+
+Rationale:
+
+- research summaries become reopenable without CLI-local reconstruction rules
+- report ownership stays in `trendlab-artifact`, so later CLI and TUI surfaces can share the same load path
+- the research bundle stays intentionally thin and auditable by linking back to replay truth instead of replacing it
 
 ## Versioning Rules
 

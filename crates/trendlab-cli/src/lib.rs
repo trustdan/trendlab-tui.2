@@ -7,9 +7,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use trendlab_artifact::{
-    DateRange, ManifestParameter, PersistedLedgerRow, ReferenceFlowDefinition, ReplayBundle,
-    RunManifest, RunSummary, SCHEMA_VERSION, diff_replay_bundles, load_replay_bundle,
-    write_replay_bundle,
+    BootstrapDistributionSummary, DateRange, LeaderboardView, ManifestParameter,
+    PersistedLedgerRow, ReferenceFlowDefinition, ReplayBundle, ResearchAggregateMember,
+    ResearchAggregateReport, ResearchBootstrapAggregateReport, ResearchBootstrapWalkForwardReport,
+    ResearchBootstrapWalkForwardSplit, ResearchLeaderboardReport, ResearchLeaderboardRow,
+    ResearchReport, ResearchWalkForwardReport, ResearchWalkForwardSplit,
+    ResearchWalkForwardSplitChild, RunManifest, RunSummary, SCHEMA_VERSION, diff_replay_bundles,
+    load_replay_bundle, load_research_report_bundle, write_replay_bundle,
+    write_research_report_bundle,
 };
 use trendlab_core::engine::{RunRequest, run_reference_flow};
 use trendlab_data::audit::audit_daily_bars;
@@ -79,35 +84,9 @@ impl StrategyComponentLabels {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct ResearchAggregateMember {
-    symbol: String,
-    bundle_path: PathBuf,
-    row_count: usize,
-    warning_count: usize,
-    trade_count: usize,
-    starting_equity: String,
-    ending_equity: String,
-    net_equity_change: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ResearchAggregateReport {
-    engine_version: String,
-    snapshot_id: String,
-    provider_identity: String,
-    date_range: String,
-    gap_policy: String,
-    historical_limitations: String,
-    symbol_count: usize,
-    total_row_count: usize,
-    total_warning_count: usize,
-    total_trade_count: usize,
-    starting_equity_total: String,
-    ending_equity_total: String,
-    net_equity_change_total: String,
-    average_net_equity_change: String,
-    symbols: Vec<String>,
-    members: Vec<ResearchAggregateMember>,
+struct ResearchAggregateOptions {
+    bundle_dirs: Vec<PathBuf>,
+    output_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -151,6 +130,7 @@ struct WalkForwardOptions {
     test_bars: usize,
     step_bars: usize,
     bundle_dirs: Vec<PathBuf>,
+    output_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -163,164 +143,43 @@ struct BootstrapOptions {
 struct BootstrapAggregateOptions {
     bootstrap: BootstrapOptions,
     bundle_dirs: Vec<PathBuf>,
+    output_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct BootstrapWalkForwardOptions {
     bootstrap: BootstrapOptions,
     walk_forward: WalkForwardOptions,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ResearchWalkForwardSplitChild {
-    symbol: String,
-    bundle_path: PathBuf,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ResearchWalkForwardSplit {
-    sequence: usize,
-    train_start_index: usize,
-    train_end_index: usize,
-    test_start_index: usize,
-    test_end_index: usize,
-    train_row_range: String,
-    train_date_range: String,
-    test_row_range: String,
-    test_date_range: String,
-    children: Vec<ResearchWalkForwardSplitChild>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ResearchWalkForwardReport {
-    engine_version: String,
-    snapshot_id: String,
-    provider_identity: String,
-    date_range: String,
-    gap_policy: String,
-    historical_limitations: String,
-    symbols: Vec<String>,
-    train_bars: usize,
-    test_bars: usize,
-    step_bars: usize,
-    split_count: usize,
-    splits: Vec<ResearchWalkForwardSplit>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct BootstrapDistributionSummary {
-    seed: u64,
-    sample_count: usize,
-    resample_size: usize,
-    metric: String,
-    baseline_metric: String,
-    bootstrap_mean: String,
-    bootstrap_median: String,
-    bootstrap_min: String,
-    bootstrap_max: String,
-    bootstrap_interval_95_lower: String,
-    bootstrap_interval_95_upper: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ResearchBootstrapAggregateReport {
-    baseline: ResearchAggregateReport,
-    distribution: BootstrapDistributionSummary,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ResearchBootstrapWalkForwardSplit {
-    sequence: usize,
-    train_row_range: String,
-    train_date_range: String,
-    test_row_range: String,
-    test_date_range: String,
-    baseline_test_total_net_equity_change: String,
-    baseline_test_average_net_equity_change: String,
-    children: Vec<ResearchWalkForwardSplitChild>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ResearchBootstrapWalkForwardReport {
-    baseline: ResearchWalkForwardReport,
-    distribution: BootstrapDistributionSummary,
-    splits: Vec<ResearchBootstrapWalkForwardSplit>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum LeaderboardView {
-    Signal,
-    PositionManager,
-    ExecutionModel,
-    System,
-}
-
-impl LeaderboardView {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Signal => "signal",
-            Self::PositionManager => "position-manager",
-            Self::ExecutionModel => "execution-model",
-            Self::System => "system",
-        }
-    }
-
-    fn parse(value: &str) -> Option<Self> {
-        match value {
-            "signal" => Some(Self::Signal),
-            "position-manager" => Some(Self::PositionManager),
-            "execution-model" => Some(Self::ExecutionModel),
-            "system" => Some(Self::System),
-            _ => None,
-        }
-    }
+    output_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct LeaderboardOptions {
     view: LeaderboardView,
     bundle_dirs: Vec<PathBuf>,
+    output_dir: Option<PathBuf>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ResearchLeaderboardRow {
-    rank: usize,
-    label: String,
-    signal_id: String,
-    filter_id: String,
-    position_manager_id: String,
-    execution_model_id: String,
-    aggregate: ResearchAggregateReport,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ResearchLeaderboardReport {
-    view: LeaderboardView,
-    engine_version: String,
-    snapshot_id: String,
-    provider_identity: String,
-    date_range: String,
-    gap_policy: String,
-    historical_limitations: String,
-    symbol_count: usize,
-    symbols: Vec<String>,
-    fixed_signal_id: Option<String>,
-    fixed_filter_id: Option<String>,
-    fixed_position_manager_id: Option<String>,
-    fixed_execution_model_id: Option<String>,
-    rows: Vec<ResearchLeaderboardRow>,
+#[derive(Clone, Copy)]
+struct ResearchBundleExpectation<'a> {
+    engine_version: &'a str,
+    snapshot_id: &'a str,
+    provider_identity: &'a str,
+    date_range: &'a str,
+    gap_policy: &'a str,
+    historical_limitations: &'a str,
 }
 
 const RUN_USAGE: &str = "usage: trendlab-cli run --request <path> --output <dir> [--provider <fixture|tiingo>] [--snapshot-id <id>] [--engine-version <version>] [--signal-id <id> --filter-id <id> --position-manager-id <id> --execution-model-id <id>]";
 const EXPLAIN_USAGE: &str = "usage: trendlab-cli explain <bundle-dir>";
 const DIFF_USAGE: &str = "usage: trendlab-cli diff <left-bundle-dir> <right-bundle-dir>";
 const AUDIT_DATA_USAGE: &str = "usage: trendlab-cli audit data <bundle-dir>";
-const RESEARCH_AGGREGATE_USAGE: &str =
-    "usage: trendlab-cli research aggregate <bundle-dir> <bundle-dir> [more-bundle-dirs...]";
-const RESEARCH_WALK_FORWARD_USAGE: &str = "usage: trendlab-cli research walk-forward --train-bars <n> --test-bars <n> [--step-bars <n>] <bundle-dir> <bundle-dir> [more-bundle-dirs...]";
-const RESEARCH_BOOTSTRAP_AGGREGATE_USAGE: &str = "usage: trendlab-cli research bootstrap aggregate --samples <n> [--seed <n>] <bundle-dir> <bundle-dir> [more-bundle-dirs...]";
-const RESEARCH_BOOTSTRAP_WALK_FORWARD_USAGE: &str = "usage: trendlab-cli research bootstrap walk-forward --samples <n> [--seed <n>] --train-bars <n> --test-bars <n> [--step-bars <n>] <bundle-dir> <bundle-dir> [more-bundle-dirs...]";
-const RESEARCH_LEADERBOARD_USAGE: &str = "usage: trendlab-cli research leaderboard <signal|position-manager|execution-model|system> <bundle-dir> <bundle-dir> [more-bundle-dirs...]";
+const RESEARCH_AGGREGATE_USAGE: &str = "usage: trendlab-cli research aggregate [--output <dir>] <bundle-dir> <bundle-dir> [more-bundle-dirs...]";
+const RESEARCH_EXPLAIN_USAGE: &str = "usage: trendlab-cli research explain <report-dir>";
+const RESEARCH_WALK_FORWARD_USAGE: &str = "usage: trendlab-cli research walk-forward --train-bars <n> --test-bars <n> [--step-bars <n>] [--output <dir>] <bundle-dir> <bundle-dir> [more-bundle-dirs...]";
+const RESEARCH_BOOTSTRAP_AGGREGATE_USAGE: &str = "usage: trendlab-cli research bootstrap aggregate --samples <n> [--seed <n>] [--output <dir>] <bundle-dir> <bundle-dir> [more-bundle-dirs...]";
+const RESEARCH_BOOTSTRAP_WALK_FORWARD_USAGE: &str = "usage: trendlab-cli research bootstrap walk-forward --samples <n> [--seed <n>] --train-bars <n> --test-bars <n> [--step-bars <n>] [--output <dir>] <bundle-dir> <bundle-dir> [more-bundle-dirs...]";
+const RESEARCH_LEADERBOARD_USAGE: &str = "usage: trendlab-cli research leaderboard <signal|position-manager|execution-model|system> [--output <dir>] <bundle-dir> <bundle-dir> [more-bundle-dirs...]";
 const STRATEGY_SIGNAL_PARAMETER: &str = "strategy.signal_id";
 const STRATEGY_FILTER_PARAMETER: &str = "strategy.filter_id";
 const STRATEGY_POSITION_PARAMETER: &str = "strategy.position_manager_id";
@@ -526,12 +385,14 @@ fn research_command(args: Vec<String>) -> Result<String, CliError> {
 
     match iter.next().as_deref() {
         Some("aggregate") => research_aggregate_command(iter.collect()),
+        Some("explain") => research_explain_command(iter.collect()),
         Some("walk-forward") => research_walk_forward_command(iter.collect()),
         Some("bootstrap") => research_bootstrap_command(iter.collect()),
         Some("leaderboard") => research_leaderboard_command(iter.collect()),
         _ => Err(CliError::invalid(format!(
-            "{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}",
             RESEARCH_AGGREGATE_USAGE,
+            RESEARCH_EXPLAIN_USAGE,
             RESEARCH_WALK_FORWARD_USAGE,
             RESEARCH_BOOTSTRAP_AGGREGATE_USAGE,
             RESEARCH_BOOTSTRAP_WALK_FORWARD_USAGE,
@@ -599,19 +460,27 @@ fn audit_data_command(args: Vec<String>) -> Result<String, CliError> {
 }
 
 fn research_aggregate_command(args: Vec<String>) -> Result<String, CliError> {
-    if args.len() < 2 {
-        return Err(CliError::invalid(RESEARCH_AGGREGATE_USAGE));
-    }
-
-    let bundles = args
-        .into_iter()
-        .map(PathBuf::from)
+    let options = parse_research_aggregate_options(args)?;
+    let bundles = options
+        .bundle_dirs
+        .iter()
+        .cloned()
         .map(|bundle_dir| load_bundle(&bundle_dir).map(|bundle| (bundle_dir, bundle)))
         .collect::<Result<Vec<_>, _>>()?;
     let comparable_set = build_comparable_research_bundle_set(&bundles)?;
-    let report = build_research_aggregate_report(&comparable_set);
+    let report = ResearchReport::Aggregate(build_research_aggregate_report(&comparable_set));
 
-    Ok(format_research_aggregate_report(&report))
+    emit_research_report(&report, options.output_dir.as_deref())
+}
+
+fn research_explain_command(args: Vec<String>) -> Result<String, CliError> {
+    let [report_dir]: [String; 1] = args
+        .try_into()
+        .map_err(|_| CliError::invalid(RESEARCH_EXPLAIN_USAGE))?;
+    let report_dir = PathBuf::from(report_dir);
+    let report = load_research_report(&report_dir)?;
+
+    Ok(format_saved_research_report(&report_dir, &report))
 }
 
 fn research_walk_forward_command(args: Vec<String>) -> Result<String, CliError> {
@@ -623,9 +492,12 @@ fn research_walk_forward_command(args: Vec<String>) -> Result<String, CliError> 
         .map(|bundle_dir| load_bundle(&bundle_dir).map(|bundle| (bundle_dir, bundle)))
         .collect::<Result<Vec<_>, _>>()?;
     let comparable_set = build_comparable_research_bundle_set(&bundles)?;
-    let report = build_research_walk_forward_report(&comparable_set, &options)?;
+    let report = ResearchReport::WalkForward(build_research_walk_forward_report(
+        &comparable_set,
+        &options,
+    )?);
 
-    Ok(format_research_walk_forward_report(&report))
+    emit_research_report(&report, options.output_dir.as_deref())
 }
 
 fn research_bootstrap_command(args: Vec<String>) -> Result<String, CliError> {
@@ -650,9 +522,12 @@ fn research_bootstrap_aggregate_command(args: Vec<String>) -> Result<String, Cli
         .map(|bundle_dir| load_bundle(&bundle_dir).map(|bundle| (bundle_dir, bundle)))
         .collect::<Result<Vec<_>, _>>()?;
     let comparable_set = build_comparable_research_bundle_set(&bundles)?;
-    let report = build_research_bootstrap_aggregate_report(&comparable_set, &options.bootstrap);
+    let report = ResearchReport::BootstrapAggregate(build_research_bootstrap_aggregate_report(
+        &comparable_set,
+        &options.bootstrap,
+    ));
 
-    Ok(format_research_bootstrap_aggregate_report(&report))
+    emit_research_report(&report, options.output_dir.as_deref())
 }
 
 fn research_bootstrap_walk_forward_command(args: Vec<String>) -> Result<String, CliError> {
@@ -665,13 +540,14 @@ fn research_bootstrap_walk_forward_command(args: Vec<String>) -> Result<String, 
         .map(|bundle_dir| load_bundle(&bundle_dir).map(|bundle| (bundle_dir, bundle)))
         .collect::<Result<Vec<_>, _>>()?;
     let comparable_set = build_comparable_research_bundle_set(&bundles)?;
-    let report = build_research_bootstrap_walk_forward_report(
-        &comparable_set,
-        &options.walk_forward,
-        &options.bootstrap,
-    )?;
+    let report =
+        ResearchReport::BootstrapWalkForward(build_research_bootstrap_walk_forward_report(
+            &comparable_set,
+            &options.walk_forward,
+            &options.bootstrap,
+        )?);
 
-    Ok(format_research_bootstrap_walk_forward_report(&report))
+    emit_research_report(&report, options.output_dir.as_deref())
 }
 
 fn research_leaderboard_command(args: Vec<String>) -> Result<String, CliError> {
@@ -683,9 +559,29 @@ fn research_leaderboard_command(args: Vec<String>) -> Result<String, CliError> {
         .map(|bundle_dir| load_bundle(&bundle_dir).map(|bundle| (bundle_dir, bundle)))
         .collect::<Result<Vec<_>, _>>()?;
     let comparable_set = build_comparable_attributed_research_bundle_set(&bundles)?;
-    let report = build_research_leaderboard_report(&comparable_set, options.view)?;
+    let report = ResearchReport::Leaderboard(build_research_leaderboard_report(
+        &comparable_set,
+        options.view,
+    )?);
 
-    Ok(format_research_leaderboard_report(&report))
+    emit_research_report(&report, options.output_dir.as_deref())
+}
+
+fn emit_research_report(
+    report: &ResearchReport,
+    output_dir: Option<&Path>,
+) -> Result<String, CliError> {
+    if let Some(output_dir) = output_dir {
+        write_research_report_bundle(output_dir, report)
+            .map_err(|err| CliError::invalid(err.to_string()))?;
+        Ok(format!(
+            "wrote research report to {}\n{}",
+            output_dir.display(),
+            format_saved_research_report(output_dir, report)
+        ))
+    } else {
+        Ok(format_research_report(report))
+    }
 }
 
 fn build_comparable_research_bundle_set(
@@ -1425,10 +1321,40 @@ fn validate_walk_forward_dates(
     Ok(expected_dates)
 }
 
+fn parse_research_aggregate_options(
+    args: Vec<String>,
+) -> Result<ResearchAggregateOptions, CliError> {
+    let mut output_dir = None;
+    let mut bundle_dirs = Vec::new();
+    let mut iter = args.into_iter();
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--output" => {
+                output_dir = Some(parse_output_dir(
+                    iter.next().as_deref(),
+                    RESEARCH_AGGREGATE_USAGE,
+                )?)
+            }
+            other => bundle_dirs.push(PathBuf::from(other)),
+        }
+    }
+
+    if bundle_dirs.len() < 2 {
+        return Err(CliError::invalid(RESEARCH_AGGREGATE_USAGE));
+    }
+
+    Ok(ResearchAggregateOptions {
+        bundle_dirs,
+        output_dir,
+    })
+}
+
 fn parse_walk_forward_options(args: Vec<String>) -> Result<WalkForwardOptions, CliError> {
     let mut train_bars = None;
     let mut test_bars = None;
     let mut step_bars = None;
+    let mut output_dir = None;
     let mut bundle_dirs = Vec::new();
     let mut iter = args.into_iter();
 
@@ -1452,6 +1378,12 @@ fn parse_walk_forward_options(args: Vec<String>) -> Result<WalkForwardOptions, C
                 step_bars = Some(parse_positive_usize(
                     iter.next().as_deref(),
                     "--step-bars",
+                    RESEARCH_WALK_FORWARD_USAGE,
+                )?);
+            }
+            "--output" => {
+                output_dir = Some(parse_output_dir(
+                    iter.next().as_deref(),
                     RESEARCH_WALK_FORWARD_USAGE,
                 )?);
             }
@@ -1476,6 +1408,7 @@ fn parse_walk_forward_options(args: Vec<String>) -> Result<WalkForwardOptions, C
         test_bars,
         step_bars,
         bundle_dirs,
+        output_dir,
     })
 }
 
@@ -1484,6 +1417,7 @@ fn parse_bootstrap_aggregate_options(
 ) -> Result<BootstrapAggregateOptions, CliError> {
     let mut samples = None;
     let mut seed = 0_u64;
+    let mut output_dir = None;
     let mut bundle_dirs = Vec::new();
     let mut iter = args.into_iter();
 
@@ -1503,6 +1437,12 @@ fn parse_bootstrap_aggregate_options(
                     RESEARCH_BOOTSTRAP_AGGREGATE_USAGE,
                 )?;
             }
+            "--output" => {
+                output_dir = Some(parse_output_dir(
+                    iter.next().as_deref(),
+                    RESEARCH_BOOTSTRAP_AGGREGATE_USAGE,
+                )?);
+            }
             other => bundle_dirs.push(PathBuf::from(other)),
         }
     }
@@ -1517,6 +1457,7 @@ fn parse_bootstrap_aggregate_options(
     Ok(BootstrapAggregateOptions {
         bootstrap: BootstrapOptions { samples, seed },
         bundle_dirs,
+        output_dir,
     })
 }
 
@@ -1528,6 +1469,7 @@ fn parse_bootstrap_walk_forward_options(
     let mut train_bars = None;
     let mut test_bars = None;
     let mut step_bars = None;
+    let mut output_dir = None;
     let mut bundle_dirs = Vec::new();
     let mut iter = args.into_iter();
 
@@ -1565,6 +1507,12 @@ fn parse_bootstrap_walk_forward_options(
                 step_bars = Some(parse_positive_usize(
                     iter.next().as_deref(),
                     "--step-bars",
+                    RESEARCH_BOOTSTRAP_WALK_FORWARD_USAGE,
+                )?);
+            }
+            "--output" => {
+                output_dir = Some(parse_output_dir(
+                    iter.next().as_deref(),
                     RESEARCH_BOOTSTRAP_WALK_FORWARD_USAGE,
                 )?);
             }
@@ -1594,7 +1542,9 @@ fn parse_bootstrap_walk_forward_options(
             test_bars,
             step_bars,
             bundle_dirs,
+            output_dir: None,
         },
+        output_dir,
     })
 }
 
@@ -1606,13 +1556,36 @@ fn parse_leaderboard_options(args: Vec<String>) -> Result<LeaderboardOptions, Cl
     let Some(view) = LeaderboardView::parse(raw_view.as_str()) else {
         return Err(CliError::invalid(RESEARCH_LEADERBOARD_USAGE));
     };
-    let bundle_dirs = iter.map(PathBuf::from).collect::<Vec<_>>();
+    let mut output_dir = None;
+    let mut bundle_dirs = Vec::new();
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--output" => {
+                output_dir = Some(parse_output_dir(
+                    iter.next().as_deref(),
+                    RESEARCH_LEADERBOARD_USAGE,
+                )?);
+            }
+            other => bundle_dirs.push(PathBuf::from(other)),
+        }
+    }
 
     if bundle_dirs.len() < 2 {
         return Err(CliError::invalid(RESEARCH_LEADERBOARD_USAGE));
     }
 
-    Ok(LeaderboardOptions { view, bundle_dirs })
+    Ok(LeaderboardOptions {
+        view,
+        bundle_dirs,
+        output_dir,
+    })
+}
+
+fn parse_output_dir(value: Option<&str>, usage: &str) -> Result<PathBuf, CliError> {
+    value
+        .map(PathBuf::from)
+        .ok_or_else(|| CliError::invalid(usage))
 }
 
 fn parse_positive_usize(value: Option<&str>, flag: &str, usage: &str) -> Result<usize, CliError> {
@@ -1670,6 +1643,30 @@ fn required_manifest_parameter(manifest: &RunManifest, name: &str) -> Result<Str
                 manifest.symbol_or_universe
             ))
         })
+}
+
+fn format_research_report(report: &ResearchReport) -> String {
+    match report {
+        ResearchReport::Aggregate(report) => format_research_aggregate_report(report),
+        ResearchReport::WalkForward(report) => format_research_walk_forward_report(report),
+        ResearchReport::BootstrapAggregate(report) => {
+            format_research_bootstrap_aggregate_report(report)
+        }
+        ResearchReport::BootstrapWalkForward(report) => {
+            format_research_bootstrap_walk_forward_report(report)
+        }
+        ResearchReport::Leaderboard(report) => format_research_leaderboard_report(report),
+    }
+}
+
+fn format_saved_research_report(report_dir: &Path, report: &ResearchReport) -> String {
+    format!(
+        "report: {}\nschema_version: {}\nreport_kind: {}\n{}",
+        report_dir.display(),
+        SCHEMA_VERSION,
+        report.kind(),
+        format_research_report(report)
+    )
 }
 
 fn format_research_aggregate_report(report: &ResearchAggregateReport) -> String {
@@ -2113,6 +2110,512 @@ fn load_bundle(bundle_dir: &Path) -> Result<ReplayBundle, CliError> {
     load_replay_bundle(bundle_dir).map_err(|err| CliError::invalid(err.to_string()))
 }
 
+fn load_research_report(report_dir: &Path) -> Result<ResearchReport, CliError> {
+    let report = load_research_report_bundle(report_dir)
+        .map_err(|err| CliError::invalid(err.to_string()))?;
+    validate_research_report_provenance(&report)?;
+    Ok(report)
+}
+
+fn validate_research_report_provenance(report: &ResearchReport) -> Result<(), CliError> {
+    match report {
+        ResearchReport::Aggregate(report) => validate_aggregate_report_provenance(report),
+        ResearchReport::WalkForward(report) => validate_walk_forward_report_provenance(report),
+        ResearchReport::BootstrapAggregate(report) => {
+            validate_bootstrap_aggregate_report_provenance(report)
+        }
+        ResearchReport::BootstrapWalkForward(report) => {
+            validate_bootstrap_walk_forward_report_provenance(report)
+        }
+        ResearchReport::Leaderboard(report) => validate_leaderboard_report_provenance(report),
+    }
+}
+
+fn validate_aggregate_report_provenance(report: &ResearchAggregateReport) -> Result<(), CliError> {
+    let expectation = aggregate_expectation(report);
+
+    for member in &report.members {
+        validate_aggregate_member_bundle(
+            &format!("research aggregate member `{}`", member.symbol),
+            member,
+            expectation,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn validate_walk_forward_report_provenance(
+    report: &ResearchWalkForwardReport,
+) -> Result<(), CliError> {
+    let expectation = walk_forward_expectation(report);
+
+    for split in &report.splits {
+        for child in &split.children {
+            let bundle = validate_bundle_against_expectation(
+                &format!(
+                    "research walk-forward split {} child `{}`",
+                    split.sequence, child.symbol
+                ),
+                &child.bundle_path,
+                &child.symbol,
+                expectation,
+            )?;
+            validate_split_indices_against_bundle(
+                &format!(
+                    "research walk-forward split {} child `{}`",
+                    split.sequence, child.symbol
+                ),
+                &bundle,
+                split.test_end_index,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_bootstrap_aggregate_report_provenance(
+    report: &ResearchBootstrapAggregateReport,
+) -> Result<(), CliError> {
+    validate_aggregate_report_provenance(&report.baseline)?;
+
+    let expected_distribution = build_bootstrap_distribution_summary(
+        &report
+            .baseline
+            .members
+            .iter()
+            .map(|member| parse_f64(&member.net_equity_change))
+            .collect::<Vec<_>>(),
+        &BootstrapOptions {
+            samples: report.distribution.sample_count,
+            seed: report.distribution.seed,
+        },
+        "average_net_equity_change",
+    );
+
+    validate_bootstrap_distribution_matches(
+        "research bootstrap aggregate distribution",
+        &report.distribution,
+        &expected_distribution,
+    )
+}
+
+fn validate_bootstrap_walk_forward_report_provenance(
+    report: &ResearchBootstrapWalkForwardReport,
+) -> Result<(), CliError> {
+    let expectation = walk_forward_expectation(&report.baseline);
+    let mut split_average_changes = Vec::with_capacity(report.splits.len());
+
+    for (stored_split, baseline_split) in report.splits.iter().zip(report.baseline.splits.iter()) {
+        let mut member_changes = Vec::with_capacity(stored_split.children.len());
+
+        for child in &stored_split.children {
+            let context = format!(
+                "research bootstrap walk-forward split {} child `{}`",
+                stored_split.sequence, child.symbol
+            );
+            let bundle = validate_bundle_against_expectation(
+                &context,
+                &child.bundle_path,
+                &child.symbol,
+                expectation,
+            )?;
+            validate_split_indices_against_bundle(
+                &context,
+                &bundle,
+                baseline_split.test_end_index,
+            )?;
+            member_changes.push(compute_test_window_net_equity_change(
+                &bundle.ledger,
+                baseline_split.test_start_index,
+                baseline_split.test_end_index,
+                &child.bundle_path,
+            )?);
+        }
+
+        let total_change = member_changes.iter().sum::<f64>();
+        let average_change = total_change / member_changes.len() as f64;
+        validate_report_metric(
+            &format!(
+                "research bootstrap walk-forward split {} baseline_test_total_net_equity_change",
+                stored_split.sequence
+            ),
+            &stored_split.baseline_test_total_net_equity_change,
+            total_change,
+        )?;
+        validate_report_metric(
+            &format!(
+                "research bootstrap walk-forward split {} baseline_test_average_net_equity_change",
+                stored_split.sequence
+            ),
+            &stored_split.baseline_test_average_net_equity_change,
+            average_change,
+        )?;
+        split_average_changes.push(average_change);
+    }
+
+    let expected_distribution = build_bootstrap_distribution_summary(
+        &split_average_changes,
+        &BootstrapOptions {
+            samples: report.distribution.sample_count,
+            seed: report.distribution.seed,
+        },
+        "mean_split_test_average_net_equity_change",
+    );
+
+    validate_bootstrap_distribution_matches(
+        "research bootstrap walk-forward distribution",
+        &report.distribution,
+        &expected_distribution,
+    )
+}
+
+fn validate_leaderboard_report_provenance(
+    report: &ResearchLeaderboardReport,
+) -> Result<(), CliError> {
+    let mut prior_average_change = None;
+    let mut prior_label = None::<String>;
+
+    for row in &report.rows {
+        let expectation = aggregate_expectation(&row.aggregate);
+
+        for member in &row.aggregate.members {
+            let context = format!(
+                "research leaderboard row {} member `{}`",
+                row.rank, member.symbol
+            );
+            let bundle = validate_aggregate_member_bundle(&context, member, expectation)?;
+
+            validate_bundle_strategy_component(
+                &context,
+                &bundle,
+                &member.bundle_path,
+                STRATEGY_SIGNAL_PARAMETER,
+                &row.signal_id,
+            )?;
+            validate_bundle_strategy_component(
+                &context,
+                &bundle,
+                &member.bundle_path,
+                STRATEGY_FILTER_PARAMETER,
+                &row.filter_id,
+            )?;
+            validate_bundle_strategy_component(
+                &context,
+                &bundle,
+                &member.bundle_path,
+                STRATEGY_POSITION_PARAMETER,
+                &row.position_manager_id,
+            )?;
+            validate_bundle_strategy_component(
+                &context,
+                &bundle,
+                &member.bundle_path,
+                STRATEGY_EXECUTION_PARAMETER,
+                &row.execution_model_id,
+            )?;
+        }
+
+        let average_change = parse_f64(&row.aggregate.average_net_equity_change);
+        if let Some(previous) = prior_average_change {
+            if average_change > previous {
+                return Err(CliError::invalid(format!(
+                    "research leaderboard row {} average_net_equity_change {} must not exceed prior row average_net_equity_change {}",
+                    row.rank,
+                    row.aggregate.average_net_equity_change,
+                    format_signed_f64(previous)
+                )));
+            }
+
+            if round4_cli(average_change) == round4_cli(previous)
+                && let Some(previous_label) = &prior_label
+                && row.label < *previous_label
+            {
+                return Err(CliError::invalid(format!(
+                    "research leaderboard row {} label `{}` must not sort before prior row label `{}` when average_net_equity_change ties",
+                    row.rank, row.label, previous_label
+                )));
+            }
+        }
+
+        prior_average_change = Some(average_change);
+        prior_label = Some(row.label.clone());
+    }
+
+    Ok(())
+}
+
+fn validate_aggregate_member_bundle(
+    context: &str,
+    member: &ResearchAggregateMember,
+    expectation: ResearchBundleExpectation<'_>,
+) -> Result<ReplayBundle, CliError> {
+    let bundle = validate_bundle_against_expectation(
+        context,
+        &member.bundle_path,
+        &member.symbol,
+        expectation,
+    )?;
+    let first_row = bundle.ledger.first().ok_or_else(|| {
+        CliError::invalid(format!(
+            "{context} requires at least one ledger row in {}",
+            member.bundle_path.display()
+        ))
+    })?;
+
+    validate_report_usize_field(
+        &format!("{context} row_count"),
+        bundle.summary.row_count,
+        member.row_count,
+    )?;
+    validate_report_usize_field(
+        &format!("{context} warning_count"),
+        bundle.summary.warning_count,
+        member.warning_count,
+    )?;
+    validate_report_usize_field(
+        &format!("{context} trade_count"),
+        count_entry_trades(&bundle.ledger),
+        member.trade_count,
+    )?;
+    validate_report_metric(
+        &format!("{context} starting_equity"),
+        &member.starting_equity,
+        first_row.equity,
+    )?;
+    validate_report_metric(
+        &format!("{context} ending_equity"),
+        &member.ending_equity,
+        bundle.summary.ending_equity,
+    )?;
+    validate_report_metric(
+        &format!("{context} net_equity_change"),
+        &member.net_equity_change,
+        bundle.summary.ending_equity - first_row.equity,
+    )?;
+
+    Ok(bundle)
+}
+
+fn validate_bundle_against_expectation(
+    context: &str,
+    bundle_path: &Path,
+    expected_symbol: &str,
+    expectation: ResearchBundleExpectation<'_>,
+) -> Result<ReplayBundle, CliError> {
+    let bundle = load_replay_bundle(bundle_path).map_err(|err| {
+        CliError::invalid(format!(
+            "{context} requires replay bundle {}: {err}",
+            bundle_path.display()
+        ))
+    })?;
+
+    validate_bundle_text_field(
+        &format!("{context} symbol"),
+        &bundle.manifest.symbol_or_universe,
+        expected_symbol,
+    )?;
+    validate_bundle_text_field(
+        &format!("{context} engine_version"),
+        &bundle.manifest.engine_version,
+        expectation.engine_version,
+    )?;
+    validate_bundle_text_field(
+        &format!("{context} snapshot_id"),
+        &bundle.manifest.data_snapshot_id,
+        expectation.snapshot_id,
+    )?;
+    validate_bundle_text_field(
+        &format!("{context} provider"),
+        &bundle.manifest.provider_identity,
+        expectation.provider_identity,
+    )?;
+    validate_bundle_text_field(
+        &format!("{context} date_range"),
+        &format!(
+            "{}..{}",
+            bundle.manifest.date_range.start_date, bundle.manifest.date_range.end_date
+        ),
+        expectation.date_range,
+    )?;
+    validate_bundle_text_field(
+        &format!("{context} gap_policy"),
+        bundle.manifest.gap_policy.as_str(),
+        expectation.gap_policy,
+    )?;
+    validate_bundle_text_field(
+        &format!("{context} historical_limitations"),
+        &format_string_list(&bundle.manifest.historical_limitations),
+        expectation.historical_limitations,
+    )?;
+
+    Ok(bundle)
+}
+
+fn validate_split_indices_against_bundle(
+    context: &str,
+    bundle: &ReplayBundle,
+    expected_last_index: usize,
+) -> Result<(), CliError> {
+    if bundle.summary.row_count <= expected_last_index {
+        Err(CliError::invalid(format!(
+            "{context} requires row {} in replay bundle but {} only has {} rows",
+            expected_last_index, bundle.manifest.symbol_or_universe, bundle.summary.row_count
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_bundle_strategy_component(
+    context: &str,
+    bundle: &ReplayBundle,
+    bundle_path: &Path,
+    parameter_name: &str,
+    expected_value: &str,
+) -> Result<(), CliError> {
+    let actual_value = bundle
+        .manifest
+        .parameters
+        .iter()
+        .find(|parameter| parameter.name == parameter_name)
+        .map(|parameter| parameter.value.as_str())
+        .ok_or_else(|| {
+            CliError::invalid(format!(
+                "{context} requires manifest parameter `{parameter_name}` on bundle {}",
+                bundle_path.display()
+            ))
+        })?;
+
+    validate_bundle_text_field(
+        &format!("{context} {parameter_name}"),
+        actual_value,
+        expected_value,
+    )
+}
+
+fn validate_bootstrap_distribution_matches(
+    context: &str,
+    actual: &BootstrapDistributionSummary,
+    expected: &BootstrapDistributionSummary,
+) -> Result<(), CliError> {
+    validate_report_usize_field(
+        &format!("{context} seed"),
+        actual.seed as usize,
+        expected.seed as usize,
+    )?;
+    validate_report_usize_field(
+        &format!("{context} sample_count"),
+        actual.sample_count,
+        expected.sample_count,
+    )?;
+    validate_report_usize_field(
+        &format!("{context} resample_size"),
+        actual.resample_size,
+        expected.resample_size,
+    )?;
+    validate_bundle_text_field(
+        &format!("{context} metric"),
+        &actual.metric,
+        &expected.metric,
+    )?;
+    validate_report_metric(
+        &format!("{context} baseline_metric"),
+        &actual.baseline_metric,
+        parse_f64(&expected.baseline_metric),
+    )?;
+    validate_report_metric(
+        &format!("{context} bootstrap_mean"),
+        &actual.bootstrap_mean,
+        parse_f64(&expected.bootstrap_mean),
+    )?;
+    validate_report_metric(
+        &format!("{context} bootstrap_median"),
+        &actual.bootstrap_median,
+        parse_f64(&expected.bootstrap_median),
+    )?;
+    validate_report_metric(
+        &format!("{context} bootstrap_min"),
+        &actual.bootstrap_min,
+        parse_f64(&expected.bootstrap_min),
+    )?;
+    validate_report_metric(
+        &format!("{context} bootstrap_max"),
+        &actual.bootstrap_max,
+        parse_f64(&expected.bootstrap_max),
+    )?;
+    validate_report_metric(
+        &format!("{context} bootstrap_interval_95_lower"),
+        &actual.bootstrap_interval_95_lower,
+        parse_f64(&expected.bootstrap_interval_95_lower),
+    )?;
+    validate_report_metric(
+        &format!("{context} bootstrap_interval_95_upper"),
+        &actual.bootstrap_interval_95_upper,
+        parse_f64(&expected.bootstrap_interval_95_upper),
+    )
+}
+
+fn validate_bundle_text_field(context: &str, actual: &str, expected: &str) -> Result<(), CliError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(CliError::invalid(format!(
+            "{context} `{actual}` does not match expected `{expected}`"
+        )))
+    }
+}
+
+fn validate_report_usize_field(
+    context: &str,
+    actual: usize,
+    expected: usize,
+) -> Result<(), CliError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(CliError::invalid(format!(
+            "{context} {actual} does not match expected {expected}"
+        )))
+    }
+}
+
+fn validate_report_metric(context: &str, actual_text: &str, expected: f64) -> Result<(), CliError> {
+    let actual = parse_f64(actual_text);
+    if round4_cli(actual) == round4_cli(expected) {
+        Ok(())
+    } else {
+        Err(CliError::invalid(format!(
+            "{context} {} does not match expected {}",
+            actual_text,
+            format_signed_f64(expected)
+        )))
+    }
+}
+
+fn aggregate_expectation(report: &ResearchAggregateReport) -> ResearchBundleExpectation<'_> {
+    ResearchBundleExpectation {
+        engine_version: &report.engine_version,
+        snapshot_id: &report.snapshot_id,
+        provider_identity: &report.provider_identity,
+        date_range: &report.date_range,
+        gap_policy: &report.gap_policy,
+        historical_limitations: &report.historical_limitations,
+    }
+}
+
+fn walk_forward_expectation(report: &ResearchWalkForwardReport) -> ResearchBundleExpectation<'_> {
+    ResearchBundleExpectation {
+        engine_version: &report.engine_version,
+        snapshot_id: &report.snapshot_id,
+        provider_identity: &report.provider_identity,
+        date_range: &report.date_range,
+        gap_policy: &report.gap_policy,
+        historical_limitations: &report.historical_limitations,
+    }
+}
+
 fn format_optional(value: Option<f64>) -> String {
     match value {
         Some(value) => format!("{value:.4}"),
@@ -2160,6 +2663,10 @@ fn percentile(sorted_values: &[f64], percentile: f64) -> f64 {
 
         lower_value + ((upper_value - lower_value) * weight)
     }
+}
+
+fn round4_cli(value: f64) -> f64 {
+    (value * 10_000.0).round() / 10_000.0
 }
 
 fn count_entry_trades(ledger: &[PersistedLedgerRow]) -> usize {
@@ -2213,6 +2720,7 @@ fn usage_text() -> String {
         &format!("  {DIFF_USAGE}"),
         &format!("  {AUDIT_DATA_USAGE}"),
         &format!("  {RESEARCH_AGGREGATE_USAGE}"),
+        &format!("  {RESEARCH_EXPLAIN_USAGE}"),
         &format!("  {RESEARCH_WALK_FORWARD_USAGE}"),
         &format!("  {RESEARCH_BOOTSTRAP_AGGREGATE_USAGE}"),
         &format!("  {RESEARCH_BOOTSTRAP_WALK_FORWARD_USAGE}"),
@@ -2265,13 +2773,16 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use trendlab_artifact::load_replay_bundle;
+    use trendlab_artifact::{
+        LeaderboardView, ResearchReport, load_replay_bundle, load_research_report_bundle,
+        write_replay_bundle,
+    };
     use trendlab_core::accounting::CostModel;
     use trendlab_core::engine::{ReferenceFlowSpec, RunRequest};
     use trendlab_core::market::DailyBar;
     use trendlab_core::orders::{EntryIntent, GapPolicy, OrderIntent};
 
-    use crate::dispatch;
+    use crate::{CliResponse, dispatch};
 
     #[test]
     fn run_command_writes_bundle_and_explain_surfaces_audit_rows() {
@@ -2551,6 +3062,106 @@ mod tests {
     }
 
     #[test]
+    fn research_aggregate_command_writes_shared_report_bundle() {
+        let snapshot_id = "fixture:m6_aggregate_persisted";
+        let engine_version = "m6-aggregate-persisted-reference-flow";
+        let alpha_bundle_dir = write_labeled_bundle(
+            "cli-aggregate-persisted-alpha",
+            &sample_request_for_symbol("ALPHA"),
+            snapshot_id,
+            engine_version,
+            None,
+        );
+        let beta_bundle_dir = write_labeled_bundle(
+            "cli-aggregate-persisted-beta",
+            &sample_request_for_symbol_with_terminal_close("BETA", 99.0),
+            snapshot_id,
+            engine_version,
+            None,
+        );
+        let report_dir = test_output_dir("cli-aggregate-report");
+
+        let response = dispatch([
+            "research",
+            "aggregate",
+            "--output",
+            report_dir.to_str().unwrap(),
+            alpha_bundle_dir.to_str().unwrap(),
+            beta_bundle_dir.to_str().unwrap(),
+        ]);
+
+        assert_eq!(response.exit_code, 0, "{}", response.stderr);
+        assert!(response.stdout.contains("wrote research report"));
+
+        let report = load_research_report_bundle(&report_dir).unwrap();
+        let ResearchReport::Aggregate(report) = report else {
+            panic!("expected aggregate research report");
+        };
+        assert_eq!(
+            report.symbols,
+            vec!["ALPHA".to_string(), "BETA".to_string()]
+        );
+        assert_eq!(report.members.len(), 2);
+        assert_eq!(report.members[0].bundle_path, alpha_bundle_dir);
+        assert_eq!(report.members[1].bundle_path, beta_bundle_dir);
+        assert_research_explain_matches_saved_output(&response, &report_dir);
+
+        remove_dir_all_if_exists(&alpha_bundle_dir);
+        remove_dir_all_if_exists(&beta_bundle_dir);
+        remove_dir_all_if_exists(&report_dir);
+    }
+
+    #[test]
+    fn research_explain_rejects_missing_aggregate_member_bundle() {
+        let snapshot_id = "fixture:m6_aggregate_missing_member";
+        let engine_version = "m6-aggregate-missing-member-reference-flow";
+        let alpha_bundle_dir = write_labeled_bundle(
+            "cli-aggregate-missing-member-alpha",
+            &sample_request_for_symbol("ALPHA"),
+            snapshot_id,
+            engine_version,
+            None,
+        );
+        let beta_bundle_dir = write_labeled_bundle(
+            "cli-aggregate-missing-member-beta",
+            &sample_request_for_symbol_with_terminal_close("BETA", 99.0),
+            snapshot_id,
+            engine_version,
+            None,
+        );
+        let report_dir = test_output_dir("cli-aggregate-missing-member-report");
+
+        let response = dispatch([
+            "research",
+            "aggregate",
+            "--output",
+            report_dir.to_str().unwrap(),
+            alpha_bundle_dir.to_str().unwrap(),
+            beta_bundle_dir.to_str().unwrap(),
+        ]);
+
+        assert_eq!(response.exit_code, 0, "{}", response.stderr);
+        fs::remove_dir_all(&alpha_bundle_dir).unwrap();
+
+        let explain_response = dispatch(["research", "explain", report_dir.to_str().unwrap()]);
+
+        assert_eq!(explain_response.exit_code, 1);
+        assert!(
+            explain_response
+                .stderr
+                .contains("research aggregate member `ALPHA`")
+        );
+        assert!(
+            explain_response
+                .stderr
+                .contains(&alpha_bundle_dir.display().to_string())
+        );
+
+        remove_dir_all_if_exists(&beta_bundle_dir);
+        remove_dir_all_if_exists(&report_dir);
+    }
+
+    #[test]
     fn research_aggregate_command_rejects_mismatched_snapshot_ids() {
         let left_request_path = test_output_dir("cli-aggregate-left-request").join("request.json");
         let right_request_path =
@@ -2700,6 +3311,59 @@ mod tests {
         remove_dir_all_if_exists(beta_request_path.parent().unwrap());
         remove_dir_all_if_exists(&alpha_bundle_dir);
         remove_dir_all_if_exists(&beta_bundle_dir);
+    }
+
+    #[test]
+    fn research_walk_forward_command_writes_shared_report_bundle() {
+        let snapshot_id = "fixture:m6_walk_forward_persisted";
+        let engine_version = "m6-walk-forward-persisted-reference-flow";
+        let alpha_bundle_dir = write_labeled_bundle(
+            "cli-walk-forward-persisted-alpha",
+            &sample_walk_forward_request_for_symbol("ALPHA"),
+            snapshot_id,
+            engine_version,
+            None,
+        );
+        let beta_bundle_dir = write_labeled_bundle(
+            "cli-walk-forward-persisted-beta",
+            &sample_walk_forward_request_for_symbol("BETA"),
+            snapshot_id,
+            engine_version,
+            None,
+        );
+        let report_dir = test_output_dir("cli-walk-forward-report");
+
+        let response = dispatch([
+            "research",
+            "walk-forward",
+            "--train-bars",
+            "3",
+            "--test-bars",
+            "2",
+            "--step-bars",
+            "1",
+            "--output",
+            report_dir.to_str().unwrap(),
+            alpha_bundle_dir.to_str().unwrap(),
+            beta_bundle_dir.to_str().unwrap(),
+        ]);
+
+        assert_eq!(response.exit_code, 0, "{}", response.stderr);
+        assert!(response.stdout.contains("wrote research report"));
+
+        let report = load_research_report_bundle(&report_dir).unwrap();
+        let ResearchReport::WalkForward(report) = report else {
+            panic!("expected walk-forward research report");
+        };
+        assert_eq!(report.split_count, 2);
+        assert_eq!(report.splits[0].children.len(), 2);
+        assert_eq!(report.splits[0].children[0].bundle_path, alpha_bundle_dir);
+        assert_eq!(report.splits[0].children[1].bundle_path, beta_bundle_dir);
+        assert_research_explain_matches_saved_output(&response, &report_dir);
+
+        remove_dir_all_if_exists(&alpha_bundle_dir);
+        remove_dir_all_if_exists(&beta_bundle_dir);
+        remove_dir_all_if_exists(&report_dir);
     }
 
     #[test]
@@ -2872,6 +3536,121 @@ mod tests {
         remove_dir_all_if_exists(beta_request_path.parent().unwrap());
         remove_dir_all_if_exists(&alpha_bundle_dir);
         remove_dir_all_if_exists(&beta_bundle_dir);
+    }
+
+    #[test]
+    fn research_bootstrap_aggregate_command_writes_shared_report_bundle() {
+        let snapshot_id = "fixture:m6_bootstrap_aggregate_persisted";
+        let engine_version = "m6-bootstrap-aggregate-persisted-reference-flow";
+        let alpha_bundle_dir = write_labeled_bundle(
+            "cli-bootstrap-aggregate-persisted-alpha",
+            &sample_request_for_symbol("ALPHA"),
+            snapshot_id,
+            engine_version,
+            None,
+        );
+        let beta_bundle_dir = write_labeled_bundle(
+            "cli-bootstrap-aggregate-persisted-beta",
+            &sample_request_for_symbol_with_terminal_close("BETA", 99.0),
+            snapshot_id,
+            engine_version,
+            None,
+        );
+        let report_dir = test_output_dir("cli-bootstrap-aggregate-report");
+
+        let response = dispatch([
+            "research",
+            "bootstrap",
+            "aggregate",
+            "--samples",
+            "5",
+            "--seed",
+            "7",
+            "--output",
+            report_dir.to_str().unwrap(),
+            alpha_bundle_dir.to_str().unwrap(),
+            beta_bundle_dir.to_str().unwrap(),
+        ]);
+
+        assert_eq!(response.exit_code, 0, "{}", response.stderr);
+        assert!(response.stdout.contains("wrote research report"));
+
+        let report = load_research_report_bundle(&report_dir).unwrap();
+        let ResearchReport::BootstrapAggregate(report) = report else {
+            panic!("expected bootstrap aggregate research report");
+        };
+        assert_eq!(report.distribution.seed, 7);
+        assert_eq!(report.distribution.sample_count, 5);
+        assert_eq!(report.baseline.members.len(), 2);
+        assert_eq!(report.baseline.members[0].bundle_path, alpha_bundle_dir);
+        assert_eq!(report.baseline.members[1].bundle_path, beta_bundle_dir);
+        assert_research_explain_matches_saved_output(&response, &report_dir);
+
+        remove_dir_all_if_exists(&alpha_bundle_dir);
+        remove_dir_all_if_exists(&beta_bundle_dir);
+        remove_dir_all_if_exists(&report_dir);
+    }
+
+    #[test]
+    fn research_bootstrap_walk_forward_command_writes_shared_report_bundle() {
+        let snapshot_id = "fixture:m6_bootstrap_walk_forward_persisted";
+        let engine_version = "m6-bootstrap-walk-forward-persisted-reference-flow";
+        let alpha_bundle_dir = write_labeled_bundle(
+            "cli-bootstrap-walk-forward-persisted-alpha",
+            &sample_walk_forward_request_for_symbol("ALPHA"),
+            snapshot_id,
+            engine_version,
+            None,
+        );
+        let beta_bundle_dir = write_labeled_bundle(
+            "cli-bootstrap-walk-forward-persisted-beta",
+            &sample_walk_forward_request_for_symbol_with_closes(
+                "BETA",
+                [100.5, 101.5, 102.5, 101.5, 105.5, 106.5],
+            ),
+            snapshot_id,
+            engine_version,
+            None,
+        );
+        let report_dir = test_output_dir("cli-bootstrap-walk-forward-report");
+
+        let response = dispatch([
+            "research",
+            "bootstrap",
+            "walk-forward",
+            "--samples",
+            "6",
+            "--seed",
+            "11",
+            "--train-bars",
+            "3",
+            "--test-bars",
+            "2",
+            "--step-bars",
+            "1",
+            "--output",
+            report_dir.to_str().unwrap(),
+            alpha_bundle_dir.to_str().unwrap(),
+            beta_bundle_dir.to_str().unwrap(),
+        ]);
+
+        assert_eq!(response.exit_code, 0, "{}", response.stderr);
+        assert!(response.stdout.contains("wrote research report"));
+
+        let report = load_research_report_bundle(&report_dir).unwrap();
+        let ResearchReport::BootstrapWalkForward(report) = report else {
+            panic!("expected bootstrap walk-forward research report");
+        };
+        assert_eq!(report.distribution.seed, 11);
+        assert_eq!(report.distribution.sample_count, 6);
+        assert_eq!(report.splits.len(), 2);
+        assert_eq!(report.splits[0].children[0].bundle_path, alpha_bundle_dir);
+        assert_eq!(report.splits[1].children[1].bundle_path, beta_bundle_dir);
+        assert_research_explain_matches_saved_output(&response, &report_dir);
+
+        remove_dir_all_if_exists(&alpha_bundle_dir);
+        remove_dir_all_if_exists(&beta_bundle_dir);
+        remove_dir_all_if_exists(&report_dir);
     }
 
     #[test]
@@ -3108,6 +3887,185 @@ mod tests {
         remove_dir_all_if_exists(&beta_close_bundle);
         remove_dir_all_if_exists(&alpha_stop_bundle);
         remove_dir_all_if_exists(&beta_stop_bundle);
+    }
+
+    #[test]
+    fn research_leaderboard_command_writes_shared_report_bundle() {
+        let snapshot_id = "fixture:m6_leaderboard_persisted";
+        let engine_version = "m6-leaderboard-persisted-reference-flow";
+        let close_signal = TestStrategyLabels {
+            signal_id: "close_confirmed_breakout",
+            filter_id: "pass_filter",
+            position_manager_id: "keep_position_manager",
+            execution_model_id: "next_open_long",
+        };
+        let stop_signal = TestStrategyLabels {
+            signal_id: "stop_entry_breakout",
+            filter_id: "pass_filter",
+            position_manager_id: "keep_position_manager",
+            execution_model_id: "next_open_long",
+        };
+        let alpha_close_bundle = write_labeled_bundle(
+            "cli-leaderboard-persisted-alpha-close",
+            &sample_request_for_symbol("ALPHA"),
+            snapshot_id,
+            engine_version,
+            Some(&close_signal),
+        );
+        let beta_close_bundle = write_labeled_bundle(
+            "cli-leaderboard-persisted-beta-close",
+            &sample_request_for_symbol_with_terminal_close("BETA", 99.0),
+            snapshot_id,
+            engine_version,
+            Some(&close_signal),
+        );
+        let alpha_stop_bundle = write_labeled_bundle(
+            "cli-leaderboard-persisted-alpha-stop",
+            &sample_request_for_symbol_with_terminal_close("ALPHA", 106.0),
+            snapshot_id,
+            engine_version,
+            Some(&stop_signal),
+        );
+        let beta_stop_bundle = write_labeled_bundle(
+            "cli-leaderboard-persisted-beta-stop",
+            &sample_request_for_symbol_with_terminal_close("BETA", 102.0),
+            snapshot_id,
+            engine_version,
+            Some(&stop_signal),
+        );
+        let report_dir = test_output_dir("cli-leaderboard-report");
+
+        let response = dispatch([
+            "research",
+            "leaderboard",
+            "signal",
+            "--output",
+            report_dir.to_str().unwrap(),
+            alpha_close_bundle.to_str().unwrap(),
+            beta_close_bundle.to_str().unwrap(),
+            alpha_stop_bundle.to_str().unwrap(),
+            beta_stop_bundle.to_str().unwrap(),
+        ]);
+
+        assert_eq!(response.exit_code, 0, "{}", response.stderr);
+        assert!(response.stdout.contains("wrote research report"));
+
+        let report = load_research_report_bundle(&report_dir).unwrap();
+        let ResearchReport::Leaderboard(report) = report else {
+            panic!("expected leaderboard research report");
+        };
+        assert_eq!(report.view, LeaderboardView::Signal);
+        assert_eq!(report.rows.len(), 2);
+        assert_eq!(report.rows[0].aggregate.members.len(), 2);
+        assert_eq!(
+            report.rows[0].aggregate.members[0].bundle_path,
+            alpha_stop_bundle
+        );
+        assert_eq!(
+            report.rows[1].aggregate.members[1].bundle_path,
+            beta_close_bundle
+        );
+        assert_research_explain_matches_saved_output(&response, &report_dir);
+
+        remove_dir_all_if_exists(&alpha_close_bundle);
+        remove_dir_all_if_exists(&beta_close_bundle);
+        remove_dir_all_if_exists(&alpha_stop_bundle);
+        remove_dir_all_if_exists(&beta_stop_bundle);
+        remove_dir_all_if_exists(&report_dir);
+    }
+
+    #[test]
+    fn research_explain_rejects_leaderboard_bundle_with_missing_strategy_attribution() {
+        let snapshot_id = "fixture:m6_leaderboard_missing_attr_on_reopen";
+        let engine_version = "m6-leaderboard-missing-attr-on-reopen-reference-flow";
+        let close_signal = TestStrategyLabels {
+            signal_id: "close_confirmed_breakout",
+            filter_id: "pass_filter",
+            position_manager_id: "keep_position_manager",
+            execution_model_id: "next_open_long",
+        };
+        let stop_signal = TestStrategyLabels {
+            signal_id: "stop_entry_breakout",
+            filter_id: "pass_filter",
+            position_manager_id: "keep_position_manager",
+            execution_model_id: "next_open_long",
+        };
+        let alpha_close_bundle = write_labeled_bundle(
+            "cli-leaderboard-missing-attr-on-reopen-alpha-close",
+            &sample_request_for_symbol("ALPHA"),
+            snapshot_id,
+            engine_version,
+            Some(&close_signal),
+        );
+        let beta_close_bundle = write_labeled_bundle(
+            "cli-leaderboard-missing-attr-on-reopen-beta-close",
+            &sample_request_for_symbol_with_terminal_close("BETA", 99.0),
+            snapshot_id,
+            engine_version,
+            Some(&close_signal),
+        );
+        let alpha_stop_bundle = write_labeled_bundle(
+            "cli-leaderboard-missing-attr-on-reopen-alpha-stop",
+            &sample_request_for_symbol_with_terminal_close("ALPHA", 106.0),
+            snapshot_id,
+            engine_version,
+            Some(&stop_signal),
+        );
+        let beta_stop_bundle = write_labeled_bundle(
+            "cli-leaderboard-missing-attr-on-reopen-beta-stop",
+            &sample_request_for_symbol_with_terminal_close("BETA", 102.0),
+            snapshot_id,
+            engine_version,
+            Some(&stop_signal),
+        );
+        let report_dir = test_output_dir("cli-leaderboard-missing-attr-on-reopen-report");
+
+        let response = dispatch([
+            "research",
+            "leaderboard",
+            "signal",
+            "--output",
+            report_dir.to_str().unwrap(),
+            alpha_close_bundle.to_str().unwrap(),
+            beta_close_bundle.to_str().unwrap(),
+            alpha_stop_bundle.to_str().unwrap(),
+            beta_stop_bundle.to_str().unwrap(),
+        ]);
+
+        assert_eq!(response.exit_code, 0, "{}", response.stderr);
+
+        let mut tampered = load_replay_bundle(&alpha_stop_bundle).unwrap();
+        tampered
+            .manifest
+            .parameters
+            .retain(|parameter| parameter.name != "strategy.signal_id");
+        write_replay_bundle(
+            &alpha_stop_bundle,
+            &tampered.manifest,
+            &tampered.summary,
+            &tampered.ledger,
+        )
+        .unwrap();
+
+        let explain_response = dispatch(["research", "explain", report_dir.to_str().unwrap()]);
+
+        assert_eq!(explain_response.exit_code, 1);
+        assert!(
+            explain_response
+                .stderr
+                .contains("requires manifest parameter `strategy.signal_id`")
+        );
+        assert!(
+            explain_response
+                .stderr
+                .contains(&alpha_stop_bundle.display().to_string())
+        );
+
+        remove_dir_all_if_exists(&alpha_close_bundle);
+        remove_dir_all_if_exists(&beta_close_bundle);
+        remove_dir_all_if_exists(&alpha_stop_bundle);
+        remove_dir_all_if_exists(&beta_stop_bundle);
+        remove_dir_all_if_exists(&report_dir);
     }
 
     #[test]
@@ -3572,6 +4530,20 @@ mod tests {
         let response = dispatch(args);
         assert_eq!(response.exit_code, 0, "{}", response.stderr);
         bundle_dir
+    }
+
+    fn assert_research_explain_matches_saved_output(response: &CliResponse, report_dir: &Path) {
+        let explain_response = dispatch(["research", "explain", report_dir.to_str().unwrap()]);
+
+        assert_eq!(explain_response.exit_code, 0, "{}", explain_response.stderr);
+
+        let expected = response
+            .stdout
+            .lines()
+            .skip(1)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(explain_response.stdout, expected);
     }
 
     fn remove_dir_all_if_exists(path: &Path) {
