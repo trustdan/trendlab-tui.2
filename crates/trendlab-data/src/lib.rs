@@ -105,7 +105,14 @@ pub mod provider {
 }
 
 pub mod snapshot {
+    use std::collections::BTreeSet;
+
     use crate::provider::ProviderIdentity;
+    use crate::{DataError, SNAPSHOT_SCHEMA_VERSION};
+
+    pub const SNAPSHOT_DESCRIPTOR_FILE_NAME: &str = "snapshot.json";
+    pub const SNAPSHOT_DAILY_DIRECTORY_NAME: &str = "daily";
+    pub const SNAPSHOT_ACTIONS_DIRECTORY_NAME: &str = "actions";
 
     #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SnapshotMetadata {
@@ -160,6 +167,213 @@ pub mod snapshot {
         pub raw_bars: Vec<RawDailyBar>,
         pub corporate_actions: Vec<CorporateAction>,
     }
+
+    #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SnapshotRequestedWindow {
+        pub start_date: String,
+        pub end_date: String,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SnapshotCaptureMetadata {
+        pub capture_mode: String,
+        pub entrypoint: String,
+        pub captured_at_unix_epoch_seconds: Option<u64>,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SnapshotCompatibility {
+        pub daily_directory: String,
+        pub actions_directory: String,
+    }
+
+    impl SnapshotCompatibility {
+        pub fn canonical() -> Self {
+            Self {
+                daily_directory: SNAPSHOT_DAILY_DIRECTORY_NAME.to_string(),
+                actions_directory: SNAPSHOT_ACTIONS_DIRECTORY_NAME.to_string(),
+            }
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SnapshotSymbolSummary {
+        pub symbol: String,
+        pub raw_bar_count: usize,
+        pub corporate_action_count: usize,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SnapshotBundleDescriptor {
+        pub schema_version: u32,
+        pub snapshot_id: String,
+        pub provider_identity: ProviderIdentity,
+        pub requested_window: SnapshotRequestedWindow,
+        pub capture: SnapshotCaptureMetadata,
+        pub compatibility: SnapshotCompatibility,
+        pub symbols: Vec<SnapshotSymbolSummary>,
+    }
+
+    impl SnapshotBundleDescriptor {
+        pub fn from_stored_symbols(
+            snapshot_id: impl Into<String>,
+            provider_identity: ProviderIdentity,
+            requested_window: SnapshotRequestedWindow,
+            capture: SnapshotCaptureMetadata,
+            symbols: &[StoredSymbolData],
+        ) -> Result<Self, DataError> {
+            let snapshot_id = snapshot_id.into();
+            if snapshot_id.trim().is_empty() {
+                return Err(DataError::invalid(
+                    "snapshot bundle descriptor requires a non-empty snapshot_id",
+                ));
+            }
+
+            if requested_window.start_date.trim().is_empty()
+                || requested_window.end_date.trim().is_empty()
+            {
+                return Err(DataError::invalid(
+                    "snapshot bundle descriptor requires non-empty requested start_date and end_date",
+                ));
+            }
+
+            if requested_window.end_date < requested_window.start_date {
+                return Err(DataError::invalid(
+                    "snapshot bundle descriptor requires end_date on or after start_date",
+                ));
+            }
+
+            if capture.capture_mode.trim().is_empty() {
+                return Err(DataError::invalid(
+                    "snapshot bundle descriptor requires a non-empty capture_mode",
+                ));
+            }
+
+            if capture.entrypoint.trim().is_empty() {
+                return Err(DataError::invalid(
+                    "snapshot bundle descriptor requires a non-empty entrypoint",
+                ));
+            }
+
+            if symbols.is_empty() {
+                return Err(DataError::invalid(
+                    "snapshot bundle descriptor requires at least one stored symbol",
+                ));
+            }
+
+            let mut seen_symbols = BTreeSet::new();
+            let mut symbol_summaries = Vec::with_capacity(symbols.len());
+
+            for stored in symbols {
+                if stored.metadata.schema_version != SNAPSHOT_SCHEMA_VERSION {
+                    return Err(DataError::invalid(format!(
+                        "stored symbol `{}` schema version {} does not match supported version {}",
+                        stored.symbol, stored.metadata.schema_version, SNAPSHOT_SCHEMA_VERSION
+                    )));
+                }
+                if stored.metadata.snapshot_id != snapshot_id {
+                    return Err(DataError::invalid(format!(
+                        "stored symbol `{}` snapshot_id `{}` does not match descriptor snapshot_id `{snapshot_id}`",
+                        stored.symbol, stored.metadata.snapshot_id
+                    )));
+                }
+                if stored.metadata.provider_identity != provider_identity {
+                    return Err(DataError::invalid(format!(
+                        "stored symbol `{}` provider_identity `{}` does not match descriptor provider_identity `{}`",
+                        stored.symbol,
+                        stored.metadata.provider_identity.as_str(),
+                        provider_identity.as_str()
+                    )));
+                }
+                if !seen_symbols.insert(stored.symbol.clone()) {
+                    return Err(DataError::invalid(format!(
+                        "snapshot bundle descriptor contains duplicate symbol `{}`",
+                        stored.symbol
+                    )));
+                }
+
+                symbol_summaries.push(SnapshotSymbolSummary {
+                    symbol: stored.symbol.clone(),
+                    raw_bar_count: stored.raw_bars.len(),
+                    corporate_action_count: stored.corporate_actions.len(),
+                });
+            }
+
+            Ok(Self {
+                schema_version: SNAPSHOT_SCHEMA_VERSION,
+                snapshot_id,
+                provider_identity,
+                requested_window,
+                capture,
+                compatibility: SnapshotCompatibility::canonical(),
+                symbols: symbol_summaries,
+            })
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct PersistedSnapshotBundle {
+        pub descriptor: SnapshotBundleDescriptor,
+        pub symbols: Vec<StoredSymbolData>,
+    }
+}
+
+fn validate_stored_symbol_data(stored: &snapshot::StoredSymbolData) -> Result<(), DataError> {
+    if stored.metadata.schema_version != SNAPSHOT_SCHEMA_VERSION {
+        return Err(DataError::invalid(format!(
+            "stored symbol data schema version {} does not match supported version {}",
+            stored.metadata.schema_version, SNAPSHOT_SCHEMA_VERSION
+        )));
+    }
+
+    if stored.metadata.snapshot_id.trim().is_empty() {
+        return Err(DataError::invalid(
+            "stored symbol data must include a non-empty snapshot_id",
+        ));
+    }
+
+    if stored.symbol.trim().is_empty() {
+        return Err(DataError::invalid(
+            "stored symbol data must include a non-empty symbol",
+        ));
+    }
+
+    if stored.raw_bars.is_empty() {
+        return Err(DataError::invalid(
+            "stored symbol data must include at least one raw daily bar",
+        ));
+    }
+
+    let mut previous_date: Option<&str> = None;
+    for raw_bar in &stored.raw_bars {
+        if raw_bar.symbol != stored.symbol {
+            return Err(DataError::invalid(format!(
+                "raw daily bar symbol `{}` does not match stored symbol `{}`",
+                raw_bar.symbol, stored.symbol
+            )));
+        }
+
+        if let Some(previous_date) = previous_date
+            && raw_bar.date.as_str() <= previous_date
+        {
+            return Err(DataError::invalid(
+                "stored raw daily bars must be in strictly increasing date order with unique dates",
+            ));
+        }
+        previous_date = Some(raw_bar.date.as_str());
+    }
+
+    for action in &stored.corporate_actions {
+        if action.symbol() != stored.symbol {
+            return Err(DataError::invalid(format!(
+                "corporate action symbol `{}` does not match stored symbol `{}`",
+                action.symbol(),
+                stored.symbol
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 pub mod ingest {
@@ -471,12 +685,364 @@ pub mod actions {
     }
 }
 
+pub mod snapshot_store {
+    use std::collections::BTreeSet;
+    use std::fs::{self, File};
+    use std::io::{BufRead, BufReader, BufWriter, Write};
+    use std::path::Path;
+
+    use serde::Serialize;
+    use serde::de::DeserializeOwned;
+
+    use crate::DataError;
+    use crate::snapshot::{
+        CorporateAction, PersistedSnapshotBundle, RawDailyBar, SNAPSHOT_ACTIONS_DIRECTORY_NAME,
+        SNAPSHOT_DAILY_DIRECTORY_NAME, SNAPSHOT_DESCRIPTOR_FILE_NAME, SnapshotBundleDescriptor,
+        SnapshotCompatibility, SnapshotMetadata,
+    };
+    use crate::validate_stored_symbol_data;
+
+    pub fn write_snapshot_bundle(
+        snapshot_dir: &Path,
+        bundle: &PersistedSnapshotBundle,
+    ) -> Result<(), DataError> {
+        validate_snapshot_bundle(bundle)?;
+
+        fs::create_dir_all(snapshot_dir).map_err(|err| {
+            DataError::invalid(format!(
+                "failed to create snapshot directory {}: {err}",
+                snapshot_dir.display()
+            ))
+        })?;
+
+        let daily_dir = snapshot_dir.join(SNAPSHOT_DAILY_DIRECTORY_NAME);
+        let actions_dir = snapshot_dir.join(SNAPSHOT_ACTIONS_DIRECTORY_NAME);
+        fs::create_dir_all(&daily_dir).map_err(|err| {
+            DataError::invalid(format!(
+                "failed to create snapshot daily directory {}: {err}",
+                daily_dir.display()
+            ))
+        })?;
+        fs::create_dir_all(&actions_dir).map_err(|err| {
+            DataError::invalid(format!(
+                "failed to create snapshot actions directory {}: {err}",
+                actions_dir.display()
+            ))
+        })?;
+
+        write_json(
+            &snapshot_dir.join(SNAPSHOT_DESCRIPTOR_FILE_NAME),
+            &bundle.descriptor,
+        )?;
+
+        for stored in &bundle.symbols {
+            write_json_lines(
+                &daily_dir.join(symbol_file_name(&stored.symbol)?),
+                &stored.raw_bars,
+            )?;
+            write_json_lines(
+                &actions_dir.join(symbol_file_name(&stored.symbol)?),
+                &stored.corporate_actions,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    pub fn load_snapshot_bundle(snapshot_dir: &Path) -> Result<PersistedSnapshotBundle, DataError> {
+        let descriptor: SnapshotBundleDescriptor =
+            read_json(&snapshot_dir.join(SNAPSHOT_DESCRIPTOR_FILE_NAME))?;
+        validate_snapshot_descriptor(&descriptor)?;
+
+        let mut symbols = Vec::with_capacity(descriptor.symbols.len());
+        for symbol_summary in &descriptor.symbols {
+            let file_name = symbol_file_name(&symbol_summary.symbol)?;
+            let raw_bars: Vec<RawDailyBar> = read_json_lines(
+                &snapshot_dir
+                    .join(SNAPSHOT_DAILY_DIRECTORY_NAME)
+                    .join(&file_name),
+            )?;
+            let corporate_actions: Vec<CorporateAction> = read_json_lines(
+                &snapshot_dir
+                    .join(SNAPSHOT_ACTIONS_DIRECTORY_NAME)
+                    .join(file_name),
+            )?;
+
+            if raw_bars.len() != symbol_summary.raw_bar_count {
+                return Err(DataError::invalid(format!(
+                    "snapshot symbol `{}` expected {} raw daily bars but loaded {}",
+                    symbol_summary.symbol,
+                    symbol_summary.raw_bar_count,
+                    raw_bars.len()
+                )));
+            }
+            if corporate_actions.len() != symbol_summary.corporate_action_count {
+                return Err(DataError::invalid(format!(
+                    "snapshot symbol `{}` expected {} corporate actions but loaded {}",
+                    symbol_summary.symbol,
+                    symbol_summary.corporate_action_count,
+                    corporate_actions.len()
+                )));
+            }
+
+            let stored = crate::snapshot::StoredSymbolData {
+                metadata: SnapshotMetadata {
+                    schema_version: descriptor.schema_version,
+                    snapshot_id: descriptor.snapshot_id.clone(),
+                    provider_identity: descriptor.provider_identity,
+                },
+                symbol: symbol_summary.symbol.clone(),
+                raw_bars,
+                corporate_actions,
+            };
+            validate_stored_symbol_data(&stored)?;
+            symbols.push(stored);
+        }
+
+        Ok(PersistedSnapshotBundle {
+            descriptor,
+            symbols,
+        })
+    }
+
+    fn validate_snapshot_bundle(bundle: &PersistedSnapshotBundle) -> Result<(), DataError> {
+        validate_snapshot_descriptor(&bundle.descriptor)?;
+
+        if bundle.symbols.len() != bundle.descriptor.symbols.len() {
+            return Err(DataError::invalid(format!(
+                "snapshot bundle descriptor lists {} symbols but bundle stores {} symbols",
+                bundle.descriptor.symbols.len(),
+                bundle.symbols.len()
+            )));
+        }
+
+        let mut seen_symbols = BTreeSet::new();
+        for stored in &bundle.symbols {
+            validate_stored_symbol_data(stored)?;
+
+            if stored.metadata.snapshot_id != bundle.descriptor.snapshot_id {
+                return Err(DataError::invalid(format!(
+                    "stored symbol `{}` snapshot_id `{}` does not match descriptor snapshot_id `{}`",
+                    stored.symbol, stored.metadata.snapshot_id, bundle.descriptor.snapshot_id
+                )));
+            }
+            if stored.metadata.provider_identity != bundle.descriptor.provider_identity {
+                return Err(DataError::invalid(format!(
+                    "stored symbol `{}` provider_identity `{}` does not match descriptor provider_identity `{}`",
+                    stored.symbol,
+                    stored.metadata.provider_identity.as_str(),
+                    bundle.descriptor.provider_identity.as_str()
+                )));
+            }
+            if !seen_symbols.insert(stored.symbol.clone()) {
+                return Err(DataError::invalid(format!(
+                    "snapshot bundle stores duplicate symbol `{}`",
+                    stored.symbol
+                )));
+            }
+
+            let symbol_summary = bundle
+                .descriptor
+                .symbols
+                .iter()
+                .find(|summary| summary.symbol == stored.symbol)
+                .ok_or_else(|| {
+                    DataError::invalid(format!(
+                        "snapshot bundle descriptor is missing symbol `{}`",
+                        stored.symbol
+                    ))
+                })?;
+
+            if symbol_summary.raw_bar_count != stored.raw_bars.len() {
+                return Err(DataError::invalid(format!(
+                    "snapshot descriptor raw_bar_count for `{}` is {} but stored data has {} bars",
+                    stored.symbol,
+                    symbol_summary.raw_bar_count,
+                    stored.raw_bars.len()
+                )));
+            }
+            if symbol_summary.corporate_action_count != stored.corporate_actions.len() {
+                return Err(DataError::invalid(format!(
+                    "snapshot descriptor corporate_action_count for `{}` is {} but stored data has {} actions",
+                    stored.symbol,
+                    symbol_summary.corporate_action_count,
+                    stored.corporate_actions.len()
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validate_snapshot_descriptor(
+        descriptor: &SnapshotBundleDescriptor,
+    ) -> Result<(), DataError> {
+        if descriptor.schema_version != crate::SNAPSHOT_SCHEMA_VERSION {
+            return Err(DataError::invalid(format!(
+                "snapshot descriptor schema version {} does not match supported version {}",
+                descriptor.schema_version,
+                crate::SNAPSHOT_SCHEMA_VERSION
+            )));
+        }
+
+        if descriptor.snapshot_id.trim().is_empty() {
+            return Err(DataError::invalid(
+                "snapshot descriptor must include a non-empty snapshot_id",
+            ));
+        }
+
+        if descriptor.requested_window.start_date.trim().is_empty()
+            || descriptor.requested_window.end_date.trim().is_empty()
+        {
+            return Err(DataError::invalid(
+                "snapshot descriptor must include non-empty requested start_date and end_date",
+            ));
+        }
+
+        if descriptor.requested_window.end_date < descriptor.requested_window.start_date {
+            return Err(DataError::invalid(
+                "snapshot descriptor requires end_date on or after start_date",
+            ));
+        }
+
+        if descriptor.capture.capture_mode.trim().is_empty() {
+            return Err(DataError::invalid(
+                "snapshot descriptor must include a non-empty capture_mode",
+            ));
+        }
+
+        if descriptor.capture.entrypoint.trim().is_empty() {
+            return Err(DataError::invalid(
+                "snapshot descriptor must include a non-empty entrypoint",
+            ));
+        }
+
+        if descriptor.compatibility != SnapshotCompatibility::canonical() {
+            return Err(DataError::invalid(format!(
+                "snapshot descriptor compatibility must use canonical directories `{}` and `{}`",
+                SNAPSHOT_DAILY_DIRECTORY_NAME, SNAPSHOT_ACTIONS_DIRECTORY_NAME
+            )));
+        }
+
+        if descriptor.symbols.is_empty() {
+            return Err(DataError::invalid(
+                "snapshot descriptor must include at least one symbol",
+            ));
+        }
+
+        let mut seen_symbols = BTreeSet::new();
+        for symbol_summary in &descriptor.symbols {
+            if symbol_summary.symbol.trim().is_empty() {
+                return Err(DataError::invalid(
+                    "snapshot descriptor symbols must include non-empty symbol names",
+                ));
+            }
+            if !seen_symbols.insert(symbol_summary.symbol.clone()) {
+                return Err(DataError::invalid(format!(
+                    "snapshot descriptor contains duplicate symbol `{}`",
+                    symbol_summary.symbol
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn symbol_file_name(symbol: &str) -> Result<String, DataError> {
+        if symbol.trim().is_empty() {
+            return Err(DataError::invalid(
+                "snapshot symbol file names require a non-empty symbol",
+            ));
+        }
+
+        if symbol
+            .chars()
+            .any(|ch| matches!(ch, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+        {
+            return Err(DataError::invalid(format!(
+                "snapshot symbol `{symbol}` cannot be represented as a canonical file name",
+            )));
+        }
+
+        Ok(format!("{symbol}.jsonl"))
+    }
+
+    fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), DataError> {
+        let file = File::create(path).map_err(|err| {
+            DataError::invalid(format!("failed to create {}: {err}", path.display()))
+        })?;
+        let mut writer = BufWriter::new(file);
+        serde_json::to_writer_pretty(&mut writer, value).map_err(|err| {
+            DataError::invalid(format!("failed to serialize {}: {err}", path.display()))
+        })?;
+        writer.write_all(b"\n").map_err(|err| {
+            DataError::invalid(format!("failed to finalize {}: {err}", path.display()))
+        })?;
+        writer
+            .flush()
+            .map_err(|err| DataError::invalid(format!("failed to flush {}: {err}", path.display())))
+    }
+
+    fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, DataError> {
+        let file = File::open(path).map_err(|err| {
+            DataError::invalid(format!("failed to open {}: {err}", path.display()))
+        })?;
+        serde_json::from_reader(BufReader::new(file))
+            .map_err(|err| DataError::invalid(format!("failed to parse {}: {err}", path.display())))
+    }
+
+    fn write_json_lines<T: Serialize>(path: &Path, rows: &[T]) -> Result<(), DataError> {
+        let file = File::create(path).map_err(|err| {
+            DataError::invalid(format!("failed to create {}: {err}", path.display()))
+        })?;
+        let mut writer = BufWriter::new(file);
+
+        for row in rows {
+            serde_json::to_writer(&mut writer, row).map_err(|err| {
+                DataError::invalid(format!("failed to serialize {}: {err}", path.display()))
+            })?;
+            writer.write_all(b"\n").map_err(|err| {
+                DataError::invalid(format!("failed to write {}: {err}", path.display()))
+            })?;
+        }
+
+        writer
+            .flush()
+            .map_err(|err| DataError::invalid(format!("failed to flush {}: {err}", path.display())))
+    }
+
+    fn read_json_lines<T: DeserializeOwned>(path: &Path) -> Result<Vec<T>, DataError> {
+        let file = File::open(path).map_err(|err| {
+            DataError::invalid(format!("failed to open {}: {err}", path.display()))
+        })?;
+        let reader = BufReader::new(file);
+        let mut rows = Vec::new();
+
+        for line in reader.lines() {
+            let line = line.map_err(|err| {
+                DataError::invalid(format!("failed to read {}: {err}", path.display()))
+            })?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            rows.push(serde_json::from_str(&line).map_err(|err| {
+                DataError::invalid(format!(
+                    "failed to parse JSON line in {}: {err}",
+                    path.display()
+                ))
+            })?);
+        }
+
+        Ok(rows)
+    }
+}
+
 pub mod normalize {
     use trendlab_core::market::DailyBar;
 
+    use crate::DataError;
     use crate::actions::{CorporateActionEffect, build_corporate_action_effects};
     use crate::snapshot::{CorporateAction, SnapshotMetadata, StoredSymbolData};
-    use crate::{DataError, SNAPSHOT_SCHEMA_VERSION};
 
     #[derive(Clone, Debug, PartialEq)]
     pub struct NormalizedSymbolData {
@@ -490,7 +1056,7 @@ pub mod normalize {
     pub fn normalize_symbol_history(
         stored: &StoredSymbolData,
     ) -> Result<NormalizedSymbolData, DataError> {
-        validate_stored_symbol_data(stored)?;
+        crate::validate_stored_symbol_data(stored)?;
 
         let corporate_action_effects = build_corporate_action_effects(&stored.corporate_actions)?;
         let mut cumulative_future_split_factor = 1.0;
@@ -525,65 +1091,6 @@ pub mod normalize {
             corporate_action_effects,
         })
     }
-
-    fn validate_stored_symbol_data(stored: &StoredSymbolData) -> Result<(), DataError> {
-        if stored.metadata.schema_version != SNAPSHOT_SCHEMA_VERSION {
-            return Err(DataError::invalid(format!(
-                "stored symbol data schema version {} does not match supported version {}",
-                stored.metadata.schema_version, SNAPSHOT_SCHEMA_VERSION
-            )));
-        }
-
-        if stored.metadata.snapshot_id.trim().is_empty() {
-            return Err(DataError::invalid(
-                "stored symbol data must include a non-empty snapshot_id",
-            ));
-        }
-
-        if stored.symbol.trim().is_empty() {
-            return Err(DataError::invalid(
-                "stored symbol data must include a non-empty symbol",
-            ));
-        }
-
-        if stored.raw_bars.is_empty() {
-            return Err(DataError::invalid(
-                "stored symbol data must include at least one raw daily bar",
-            ));
-        }
-
-        let mut previous_date: Option<&str> = None;
-        for raw_bar in &stored.raw_bars {
-            if raw_bar.symbol != stored.symbol {
-                return Err(DataError::invalid(format!(
-                    "raw daily bar symbol `{}` does not match stored symbol `{}`",
-                    raw_bar.symbol, stored.symbol
-                )));
-            }
-
-            if let Some(previous_date) = previous_date
-                && raw_bar.date.as_str() <= previous_date
-            {
-                return Err(DataError::invalid(
-                    "stored raw daily bars must be in strictly increasing date order with unique dates",
-                ));
-            }
-            previous_date = Some(raw_bar.date.as_str());
-        }
-
-        for action in &stored.corporate_actions {
-            if action.symbol() != stored.symbol {
-                return Err(DataError::invalid(format!(
-                    "corporate action symbol `{}` does not match stored symbol `{}`",
-                    action.symbol(),
-                    stored.symbol
-                )));
-            }
-        }
-
-        Ok(())
-    }
-
     fn round4(value: f64) -> f64 {
         (value * 10_000.0).round() / 10_000.0
     }
@@ -1001,11 +1508,21 @@ pub mod audit {
 }
 
 pub mod live {
+    use std::time::Duration;
+
+    use reqwest::blocking::Client;
+
     use crate::DataError;
-    use crate::provider::ProviderIdentity;
+    use crate::SNAPSHOT_SCHEMA_VERSION;
+    use crate::ingest::ingest_tiingo_symbol_history;
+    use crate::provider::{
+        ProviderIdentity, TiingoCorporateAction, TiingoCorporateActionKind, TiingoDailyBar,
+    };
     use crate::resample::ResampleFrequency;
+    use crate::snapshot::{SnapshotMetadata, StoredSymbolData};
 
     pub const TIINGO_API_TOKEN_ENV: &str = "TIINGO_API_TOKEN";
+    const TIINGO_HISTORICAL_PRICES_URL: &str = "https://api.tiingo.com/tiingo/daily/";
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct LiveSymbolHistoryRequest {
@@ -1025,12 +1542,29 @@ pub mod live {
         pub invariants: Vec<String>,
     }
 
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct LiveFetchedSymbolHistory {
+        pub provider_identity: ProviderIdentity,
+        pub snapshot_id: String,
+        pub symbol: String,
+        pub first_date: String,
+        pub last_date: String,
+        pub provider_daily_bar_count: usize,
+        pub provider_corporate_action_count: usize,
+        pub stored: StoredSymbolData,
+    }
+
     pub trait ProviderAdapter {
         fn provider_identity(&self) -> ProviderIdentity;
         fn smoke_plan(
             &self,
             request: &LiveSymbolHistoryRequest,
         ) -> Result<SmokeCheckPlan, DataError>;
+        fn fetch_symbol_history(
+            &self,
+            request: &LiveSymbolHistoryRequest,
+            api_token: &str,
+        ) -> Result<LiveFetchedSymbolHistory, DataError>;
     }
 
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1055,7 +1589,7 @@ pub mod live {
                 end_date: request.end_date.clone(),
                 expected_resamples: vec![ResampleFrequency::Weekly, ResampleFrequency::Monthly],
                 invariants: vec![
-                    "fetch Tiingo daily bars and corporate actions outside normal validation"
+                    "fetch the Tiingo historical prices endpoint over real HTTP outside normal validation"
                         .to_string(),
                     "ingest provider-native rows into stored symbol history before normalization"
                         .to_string(),
@@ -1066,6 +1600,89 @@ pub mod live {
                     "resample canonical daily bars into weekly and monthly bars inside trendlab-data"
                         .to_string(),
                 ],
+            })
+        }
+
+        fn fetch_symbol_history(
+            &self,
+            request: &LiveSymbolHistoryRequest,
+            api_token: &str,
+        ) -> Result<LiveFetchedSymbolHistory, DataError> {
+            validate_live_request(request)?;
+
+            if api_token.trim().is_empty() {
+                return Err(DataError::invalid(
+                    "tiingo live fetch requires a non-empty API token",
+                ));
+            }
+
+            let client = Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .map_err(|err| {
+                    DataError::invalid(format!("failed to build Tiingo HTTP client: {err}"))
+                })?;
+            let url = build_tiingo_historical_prices_url(request, api_token)?;
+            let response = client
+                .get(url)
+                .header(reqwest::header::ACCEPT, "application/json")
+                .send()
+                .map_err(|err| {
+                    DataError::invalid(format!("tiingo live fetch request failed: {err}"))
+                })?;
+            let status = response.status();
+            let body = response.text().map_err(|err| {
+                DataError::invalid(format!("failed to read Tiingo response body: {err}"))
+            })?;
+
+            if !status.is_success() {
+                return Err(DataError::invalid(format!(
+                    "tiingo live fetch failed with HTTP {}: {}",
+                    status,
+                    summarize_provider_body(&body)
+                )));
+            }
+
+            let price_rows = decode_tiingo_price_rows(&body)?;
+            if price_rows.is_empty() {
+                return Err(DataError::invalid(
+                    "tiingo live fetch returned no daily price rows",
+                ));
+            }
+
+            let (daily_bars, corporate_actions) =
+                convert_tiingo_price_rows(&request.symbol, &price_rows)?;
+            let metadata = build_live_snapshot_metadata(request, &daily_bars);
+            let stored = ingest_tiingo_symbol_history(
+                metadata,
+                &request.symbol,
+                &daily_bars,
+                &corporate_actions,
+            )?;
+            let first_date = stored
+                .raw_bars
+                .first()
+                .map(|bar| bar.date.clone())
+                .ok_or_else(|| {
+                    DataError::invalid("tiingo live fetch did not produce stored daily bars")
+                })?;
+            let last_date = stored
+                .raw_bars
+                .last()
+                .map(|bar| bar.date.clone())
+                .ok_or_else(|| {
+                    DataError::invalid("tiingo live fetch did not produce stored daily bars")
+                })?;
+
+            Ok(LiveFetchedSymbolHistory {
+                provider_identity: self.provider_identity(),
+                snapshot_id: stored.metadata.snapshot_id.clone(),
+                symbol: stored.symbol.clone(),
+                first_date,
+                last_date,
+                provider_daily_bar_count: daily_bars.len(),
+                provider_corporate_action_count: corporate_actions.len(),
+                stored,
             })
         }
     }
@@ -1091,13 +1708,285 @@ pub mod live {
 
         Ok(())
     }
+
+    fn build_tiingo_historical_prices_url(
+        request: &LiveSymbolHistoryRequest,
+        api_token: &str,
+    ) -> Result<reqwest::Url, DataError> {
+        let mut url = reqwest::Url::parse(TIINGO_HISTORICAL_PRICES_URL)
+            .map_err(|err| DataError::invalid(format!("invalid Tiingo base URL: {err}")))?;
+        url.path_segments_mut()
+            .map_err(|_| DataError::invalid("invalid Tiingo historical prices URL shape"))?
+            .pop_if_empty()
+            .extend([request.symbol.as_str(), "prices"]);
+        url.query_pairs_mut()
+            .append_pair("startDate", &request.start_date)
+            .append_pair("endDate", &request.end_date)
+            .append_pair("format", "json")
+            .append_pair("token", api_token);
+        Ok(url)
+    }
+
+    fn build_live_snapshot_metadata(
+        request: &LiveSymbolHistoryRequest,
+        daily_bars: &[TiingoDailyBar],
+    ) -> SnapshotMetadata {
+        let first_date = daily_bars
+            .first()
+            .map(|bar| bar.date.as_str())
+            .unwrap_or(request.start_date.as_str());
+        let last_date = daily_bars
+            .last()
+            .map(|bar| bar.date.as_str())
+            .unwrap_or(request.end_date.as_str());
+
+        SnapshotMetadata {
+            schema_version: SNAPSHOT_SCHEMA_VERSION,
+            snapshot_id: format!(
+                "live:{}:{}:{}:{}",
+                ProviderIdentity::Tiingo.as_str(),
+                request.symbol,
+                first_date,
+                last_date
+            ),
+            provider_identity: ProviderIdentity::Tiingo,
+        }
+    }
+
+    fn decode_tiingo_price_rows(body: &str) -> Result<Vec<TiingoHistoricalPriceRow>, DataError> {
+        serde_json::from_str(body).map_err(|err| {
+            DataError::invalid(format!("failed to parse Tiingo JSON payload: {err}"))
+        })
+    }
+
+    fn convert_tiingo_price_rows(
+        symbol: &str,
+        price_rows: &[TiingoHistoricalPriceRow],
+    ) -> Result<(Vec<TiingoDailyBar>, Vec<TiingoCorporateAction>), DataError> {
+        let mut daily_bars = Vec::with_capacity(price_rows.len());
+        let mut corporate_actions = Vec::new();
+
+        for row in price_rows {
+            let normalized_date = normalize_tiingo_date(&row.date)?;
+            let split_factor = row.split_factor.unwrap_or(1.0);
+            let div_cash = row.div_cash.unwrap_or(0.0);
+
+            if split_factor <= 0.0 {
+                return Err(DataError::invalid(
+                    "tiingo live fetch returned a non-positive splitFactor",
+                ));
+            }
+
+            if div_cash < 0.0 {
+                return Err(DataError::invalid(
+                    "tiingo live fetch returned a negative divCash",
+                ));
+            }
+
+            daily_bars.push(TiingoDailyBar {
+                symbol: symbol.to_string(),
+                date: normalized_date.clone(),
+                open: row.open,
+                high: row.high,
+                low: row.low,
+                close: row.close,
+                volume: row.volume,
+            });
+
+            if (split_factor - 1.0).abs() > f64::EPSILON {
+                corporate_actions.push(TiingoCorporateAction {
+                    symbol: symbol.to_string(),
+                    ex_date: normalized_date.clone(),
+                    kind: TiingoCorporateActionKind::Split,
+                    split_ratio: Some(split_factor),
+                    cash_amount: None,
+                });
+            }
+
+            if div_cash > 0.0 {
+                corporate_actions.push(TiingoCorporateAction {
+                    symbol: symbol.to_string(),
+                    ex_date: normalized_date,
+                    kind: TiingoCorporateActionKind::CashDividend,
+                    split_ratio: None,
+                    cash_amount: Some(div_cash),
+                });
+            }
+        }
+
+        Ok((daily_bars, corporate_actions))
+    }
+
+    fn normalize_tiingo_date(value: &str) -> Result<String, DataError> {
+        let trimmed = value.trim();
+        if trimmed.len() < 10 {
+            return Err(DataError::invalid(
+                "tiingo live fetch returned a malformed date",
+            ));
+        }
+
+        let date = &trimmed[..10];
+        if !looks_like_iso_date(date) {
+            return Err(DataError::invalid(
+                "tiingo live fetch returned a non-ISO date",
+            ));
+        }
+
+        Ok(date.to_string())
+    }
+
+    fn looks_like_iso_date(value: &str) -> bool {
+        value.len() == 10
+            && value.as_bytes()[4] == b'-'
+            && value.as_bytes()[7] == b'-'
+            && value
+                .chars()
+                .enumerate()
+                .all(|(index, ch)| matches!(index, 4 | 7) || ch.is_ascii_digit())
+    }
+
+    fn summarize_provider_body(body: &str) -> String {
+        let normalized = body.split_whitespace().collect::<Vec<_>>().join(" ");
+        let summary: String = normalized.chars().take(160).collect();
+        if normalized.chars().count() > 160 {
+            format!("{summary}...")
+        } else if summary.is_empty() {
+            "empty response body".to_string()
+        } else {
+            summary
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+    struct TiingoHistoricalPriceRow {
+        date: String,
+        open: f64,
+        high: f64,
+        low: f64,
+        close: f64,
+        volume: u64,
+        #[serde(default, rename = "divCash")]
+        div_cash: Option<f64>,
+        #[serde(default, rename = "splitFactor")]
+        split_factor: Option<f64>,
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn tiingo_historical_prices_url_carries_window_and_token() {
+            let url = build_tiingo_historical_prices_url(
+                &LiveSymbolHistoryRequest {
+                    symbol: "SPY".to_string(),
+                    start_date: "2025-01-02".to_string(),
+                    end_date: "2025-01-10".to_string(),
+                },
+                "secret-token",
+            )
+            .unwrap();
+
+            assert_eq!(
+                url.as_str(),
+                "https://api.tiingo.com/tiingo/daily/SPY/prices?startDate=2025-01-02&endDate=2025-01-10&format=json&token=secret-token"
+            );
+        }
+
+        #[test]
+        fn tiingo_price_rows_decode_into_bars_and_actions() {
+            let rows = decode_tiingo_price_rows(
+                r#"
+                [
+                  {
+                    "date": "2025-01-06T00:00:00.000Z",
+                    "open": 100.0,
+                    "high": 102.0,
+                    "low": 99.0,
+                    "close": 101.0,
+                    "volume": 12345,
+                    "divCash": 0.25,
+                    "splitFactor": 2.0
+                  },
+                  {
+                    "date": "2025-01-07T00:00:00.000Z",
+                    "open": 51.0,
+                    "high": 53.0,
+                    "low": 50.0,
+                    "close": 52.0,
+                    "volume": 23456,
+                    "divCash": 0.0,
+                    "splitFactor": 1.0
+                  }
+                ]
+                "#,
+            )
+            .unwrap();
+
+            let (daily_bars, corporate_actions) = convert_tiingo_price_rows("SPY", &rows).unwrap();
+
+            assert_eq!(daily_bars.len(), 2);
+            assert_eq!(daily_bars[0].date, "2025-01-06");
+            assert_eq!(daily_bars[1].date, "2025-01-07");
+            assert_eq!(corporate_actions.len(), 2);
+            assert_eq!(
+                corporate_actions[0],
+                TiingoCorporateAction {
+                    symbol: "SPY".to_string(),
+                    ex_date: "2025-01-06".to_string(),
+                    kind: TiingoCorporateActionKind::Split,
+                    split_ratio: Some(2.0),
+                    cash_amount: None,
+                }
+            );
+            assert_eq!(
+                corporate_actions[1],
+                TiingoCorporateAction {
+                    symbol: "SPY".to_string(),
+                    ex_date: "2025-01-06".to_string(),
+                    kind: TiingoCorporateActionKind::CashDividend,
+                    split_ratio: None,
+                    cash_amount: Some(0.25),
+                }
+            );
+        }
+
+        #[test]
+        fn tiingo_price_rows_reject_non_positive_split_factor() {
+            let rows = decode_tiingo_price_rows(
+                r#"
+                [
+                  {
+                    "date": "2025-01-06T00:00:00.000Z",
+                    "open": 100.0,
+                    "high": 102.0,
+                    "low": 99.0,
+                    "close": 101.0,
+                    "volume": 12345,
+                    "splitFactor": 0.0
+                  }
+                ]
+                "#,
+            )
+            .unwrap();
+
+            let error = convert_tiingo_price_rows("SPY", &rows).unwrap_err();
+
+            assert_eq!(
+                error.to_string(),
+                "tiingo live fetch returned a non-positive splitFactor"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::ffi::OsString;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::SNAPSHOT_SCHEMA_VERSION;
     use crate::actions::build_corporate_action_effects;
@@ -1111,7 +2000,11 @@ mod tests {
         ProviderIdentity, TiingoCorporateAction, TiingoCorporateActionKind, TiingoDailyBar,
     };
     use crate::resample::{ResampleFrequency, resample_symbol_history};
-    use crate::snapshot::{CorporateAction, SnapshotMetadata};
+    use crate::snapshot::{
+        CorporateAction, PersistedSnapshotBundle, SnapshotBundleDescriptor,
+        SnapshotCaptureMetadata, SnapshotMetadata, SnapshotRequestedWindow,
+    };
+    use crate::snapshot_store::{load_snapshot_bundle, write_snapshot_bundle};
     use trendlab_core::market::DailyBar;
 
     #[test]
@@ -1441,6 +2334,93 @@ mod tests {
         );
     }
 
+    #[test]
+    fn snapshot_bundle_round_trips_through_snapshot_json_and_jsonl_layout() {
+        let bars = load_tiingo_bars("m2_tiingo_split_adjustment").unwrap();
+        let actions = load_tiingo_actions("m2_tiingo_split_adjustment").unwrap();
+        let stored = ingest_tiingo_symbol_history(
+            SnapshotMetadata {
+                schema_version: SNAPSHOT_SCHEMA_VERSION,
+                snapshot_id: "live:tiingo:TEST:2025-01-03:2025-01-08".to_string(),
+                provider_identity: ProviderIdentity::Tiingo,
+            },
+            "TEST",
+            &bars,
+            &actions,
+        )
+        .unwrap();
+        let descriptor = SnapshotBundleDescriptor::from_stored_symbols(
+            stored.metadata.snapshot_id.clone(),
+            stored.metadata.provider_identity,
+            sample_requested_window(),
+            sample_capture_metadata(),
+            std::slice::from_ref(&stored),
+        )
+        .unwrap();
+        let bundle = PersistedSnapshotBundle {
+            descriptor,
+            symbols: vec![stored.clone()],
+        };
+        let snapshot_dir = temp_test_dir("snapshot_round_trip");
+
+        write_snapshot_bundle(&snapshot_dir, &bundle).unwrap();
+        let reopened = load_snapshot_bundle(&snapshot_dir).unwrap();
+        let normalized = normalize_symbol_history(&reopened.symbols[0]).unwrap();
+        let monthly = resample_symbol_history(&normalized, ResampleFrequency::Monthly).unwrap();
+
+        assert_eq!(reopened, bundle);
+        assert_eq!(normalized.symbol, "TEST");
+        assert_eq!(normalized.bars.len(), 4);
+        assert_eq!(monthly.bars.len(), 1);
+
+        fs::remove_dir_all(snapshot_dir).unwrap();
+    }
+
+    #[test]
+    fn snapshot_bundle_load_rejects_missing_daily_file() {
+        let bundle = sample_snapshot_bundle();
+        let snapshot_dir = temp_test_dir("snapshot_missing_daily");
+        let daily_file = snapshot_dir.join("daily").join("TEST.jsonl");
+
+        write_snapshot_bundle(&snapshot_dir, &bundle).unwrap();
+        fs::remove_file(&daily_file).unwrap();
+
+        let error = load_snapshot_bundle(&snapshot_dir).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("failed to open {}", daily_file.display()))
+        );
+
+        fs::remove_dir_all(snapshot_dir).unwrap();
+    }
+
+    #[test]
+    fn snapshot_bundle_load_rejects_descriptor_count_drift() {
+        let bundle = sample_snapshot_bundle();
+        let snapshot_dir = temp_test_dir("snapshot_count_drift");
+        let descriptor_path = snapshot_dir.join("snapshot.json");
+
+        write_snapshot_bundle(&snapshot_dir, &bundle).unwrap();
+        let mut descriptor = bundle.descriptor.clone();
+        descriptor.symbols[0].raw_bar_count += 1;
+        fs::write(
+            &descriptor_path,
+            format!("{}\n", serde_json::to_string_pretty(&descriptor).unwrap()),
+        )
+        .unwrap();
+
+        let error = load_snapshot_bundle(&snapshot_dir).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "snapshot symbol `TEST` expected 5 raw daily bars but loaded 4"
+        );
+
+        fs::remove_dir_all(snapshot_dir).unwrap();
+    }
+
     fn sample_metadata(name: &str) -> SnapshotMetadata {
         SnapshotMetadata {
             schema_version: SNAPSHOT_SCHEMA_VERSION,
@@ -1500,12 +2480,71 @@ mod tests {
         workspace_root().join("fixtures").join(name)
     }
 
+    fn sample_requested_window() -> SnapshotRequestedWindow {
+        SnapshotRequestedWindow {
+            start_date: "2025-01-02".to_string(),
+            end_date: "2025-01-10".to_string(),
+        }
+    }
+
+    fn sample_capture_metadata() -> SnapshotCaptureMetadata {
+        SnapshotCaptureMetadata {
+            capture_mode: "live_provider_fetch".to_string(),
+            entrypoint: "cargo xtask capture-live-snapshot".to_string(),
+            captured_at_unix_epoch_seconds: Some(1_736_400_000),
+        }
+    }
+
+    fn sample_snapshot_bundle() -> PersistedSnapshotBundle {
+        let bars = load_tiingo_bars("m2_tiingo_split_adjustment").unwrap();
+        let actions = load_tiingo_actions("m2_tiingo_split_adjustment").unwrap();
+        let stored = ingest_tiingo_symbol_history(
+            SnapshotMetadata {
+                schema_version: SNAPSHOT_SCHEMA_VERSION,
+                snapshot_id: "live:tiingo:TEST:2025-01-03:2025-01-08".to_string(),
+                provider_identity: ProviderIdentity::Tiingo,
+            },
+            "TEST",
+            &bars,
+            &actions,
+        )
+        .unwrap();
+        let descriptor = SnapshotBundleDescriptor::from_stored_symbols(
+            stored.metadata.snapshot_id.clone(),
+            stored.metadata.provider_identity,
+            sample_requested_window(),
+            sample_capture_metadata(),
+            std::slice::from_ref(&stored),
+        )
+        .unwrap();
+
+        PersistedSnapshotBundle {
+            descriptor,
+            symbols: vec![stored],
+        }
+    }
+
     fn workspace_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(Path::parent)
             .expect("trendlab-data lives under crates/")
             .to_path_buf()
+    }
+
+    fn temp_test_dir(label: &str) -> PathBuf {
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+        let mut path = std::env::temp_dir();
+        path.push(OsString::from(format!(
+            "trendlab-data-{label}-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        )));
+        if path.exists() {
+            fs::remove_dir_all(&path).unwrap();
+        }
+        path
     }
 
     fn read_required_file(path: &Path) -> Result<String, String> {

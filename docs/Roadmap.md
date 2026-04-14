@@ -18,7 +18,7 @@ Use this document with:
 - Builder capacity is 10-15 hours per week.
 - Work is done by one human operator with agent assistance.
 - Default validation is offline, deterministic, and network-free.
-- Current roadmap coverage is M1 through M6.
+- Current roadmap coverage is M1 through M8.
 - The first eight weeks are the most concrete.
 - Later weeks are explicit but carry lower confidence when they depend on prior implementation outcomes.
 
@@ -117,6 +117,22 @@ These are the "done means done" gates that each milestone must satisfy before th
 - Cross-symbol aggregation, walk-forward, bootstrap confidence, and separated leaderboards operate on the stable core.
 - Additional research features do not obscure run provenance.
 - Point-in-time universes are added only if the prerequisite data model is stable enough to support them honestly.
+
+### M7 Gate: Trust Hardening And Operator Surface
+
+- Operator-facing run specs map cleanly onto shared and core request types without creating CLI-owned truth.
+- Replay and research artifacts fail explicitly on broken links or integrity drift.
+- Strategy-layer behavior is covered by deterministic fixture or oracle scenarios in addition to unit-only coverage.
+- Live-provider smoke exercises a real provider fetch path while remaining outside normal validation.
+- Point-in-time universes remain deferred until the universe snapshot and historical-membership model are honest enough to support them.
+
+### M8 Gate: Snapshot Capture And Data Provenance
+
+- Live-fetched symbol history can be written and reopened through the documented snapshot ownership path without hidden provider refetches.
+- Snapshot reopen and audit surfaces preserve provider identity, raw bars, corporate actions, and derived normalization inputs explicitly enough for audit.
+- Operator-facing run or audit flows can point at stored snapshots without inventing CLI-owned market-data truth.
+- Optional live snapshot capture remains outside `cargo xtask validate`, and default validation stays deterministic and network-free.
+- Point-in-time universes remain deferred until the snapshot and historical-membership model are honest enough to support them.
 
 ## Week 0: Planning Closure
 
@@ -828,6 +844,222 @@ The Week 20 checkpoint concludes that point-in-time universe support is not hone
 - Risk note:
   - the correct outcome may still be a narrower but honest M6 close, with point-in-time universes explicitly pushed beyond the current milestone block.
 
+## Weeks 25-28: Post-M6 Trust-Hardening Plan
+
+Week 24 concludes that M6 is honestly complete without point-in-time universes. The current research stack already satisfies the milestone gate because aggregate, walk-forward, bootstrap, and separated leaderboard reporting now reopen through shared artifact ownership and preserve drill-down back to replay truth. The next block therefore focuses on remaining operator, portability, and validation gaps before any new market-model breadth is scheduled.
+
+### Week 25
+
+- Objective: add a higher-level operator-facing run spec without moving truth ownership out of shared and core types.
+- Confidence: `Medium`
+- Planning status: `Fixed`
+- Scope:
+  - define the first operator-facing run-spec shape on top of the existing core request surface
+  - decide whether strategy-component attribution remains standardized manifest parameters or becomes first-class manifest fields
+  - keep universe-truth and cost or gap provenance explicit in the resulting run path
+- Deliverables/artifacts:
+  - operator-facing run-spec model
+  - mapping path into the existing core and shared run-request surface
+  - tests covering manifest and provenance preservation
+- Validation/checks:
+  - run-spec loading does not create CLI-owned truth about artifacts or strategy attribution
+  - the same operator spec produces the same manifest and replay bundle deterministically
+  - `cargo xtask validate`
+- Exit criteria:
+  - the CLI no longer relies on raw serialized core `RunRequest` inputs as the only operator-facing run surface
+- Non-goals:
+  - point-in-time universe membership
+  - new strategy families
+- Dependencies/blockers:
+  - Week 24 checkpoint
+- Risk note:
+  - run-spec ergonomics may pressure crate ownership if shared manifest and request concerns are not kept cleanly separated.
+
+### Week 26
+
+- Objective: harden replay-bundle and research-report portability plus integrity signaling.
+- Confidence: `Medium`
+- Planning status: `Provisional`
+- Scope:
+  - decide how shared artifact links normalize across move, copy, and reopen flows
+  - add explicit integrity metadata where path validation alone is not enough
+  - tighten older-bundle compatibility posture where the current metadata is too thin
+- Deliverables/artifacts:
+  - clarified portability rules
+  - replay and research bundle integrity metadata or checks
+  - tests covering stale-path and stale-content rejection
+- Validation/checks:
+  - moved or copied artifacts either reopen honestly or fail with explicit reasons
+  - integrity drift is surfaced without inventing parallel CLI or TUI parsing rules
+  - `cargo xtask validate`
+- Exit criteria:
+  - shared artifact reopen behavior is portable enough to support future CLI and TUI workflows without silent trust loss
+- Non-goals:
+  - new research statistics
+  - point-in-time universe membership
+- Dependencies/blockers:
+  - Week 25 operator-facing spec boundary
+- Risk note:
+  - portability decisions may force an explicit compatibility story for already-written bundles and reports.
+
+### Week 27
+
+- Objective: add audit-grade strategy fixtures and oracles so the compositional system is not validated only by unit tests.
+- Confidence: `Medium`
+- Planning status: `Provisional`
+- Scope:
+  - define the first deterministic fixture-backed strategy scenarios spanning signals, filters, execution blocking, and position management
+  - add hand-authored oracle coverage where unit tests are not enough to explain the expected ledger path
+  - tighten explain surfaces only if the new scenarios expose missing reason metadata
+- Deliverables/artifacts:
+  - strategy-layer fixtures
+  - oracle-backed strategy regressions
+  - any narrowly-scoped explainability additions required by the new fixtures
+- Validation/checks:
+  - strategy-layer scenarios replay through persisted artifacts without hidden state
+  - blocked-trade and execution-path reasoning remains explicit
+  - `cargo xtask validate`
+- Exit criteria:
+  - strategy composition is covered by deterministic audit-grade regression paths in addition to unit-only tests
+- Non-goals:
+  - new entry or exit families
+  - TUI-polish-only work
+- Dependencies/blockers:
+  - Weeks 25-26 if new manifest or artifact surfaces are needed
+- Risk note:
+  - strategy fixtures may expose missing ledger fields or attribution details that were invisible in the current unit-test-only path.
+
+### Week 28
+
+- Objective: make the live-provider smoke lane execute a real provider fetch and re-check the next planning horizon.
+- Confidence: `Low`
+- Planning status: `Provisional`
+- Scope:
+  - turn the current Tiingo smoke-plan and config-validation lane into a minimal real-fetch smoke path
+  - keep networked validation explicitly outside `cargo xtask validate`
+  - re-check whether point-in-time prerequisites are any closer or remain backlog-only
+- Deliverables/artifacts:
+  - real-fetch `validate-live` smoke path
+  - updated future-week roadmap checkpoint
+- Validation/checks:
+  - `cargo xtask validate-live --provider tiingo` fails cleanly without `TIINGO_API_TOKEN` and verifies a real provider response when configured
+  - `cargo xtask validate` remains deterministic and network-free
+- Exit criteria:
+  - live-provider smoke verifies the actual provider boundary honestly
+  - the next planning horizon is explicit after the first post-M6 hardening block
+- Non-goals:
+  - point-in-time universe implementation
+  - default validation that depends on network access
+- Dependencies/blockers:
+  - Weeks 25-27
+- Risk note:
+  - a real provider smoke path introduces external API variability, so the scope must stay narrow and explicitly optional.
+
+## Weeks 29-32: Post-M7 Snapshot-Capture Plan
+
+Week 28 closes M7 honestly, but the repo still lacks a persisted live-data snapshot path that operators can reopen and audit without going back to the provider. Week 29 freezes the first slice around `trendlab-data` ownership, an initial `xtask` capture entrypoint, and an inspectable `snapshot.json` plus `daily/*.jsonl` and `actions/*.jsonl` layout that persists stored raw bars and corporate actions while recomputing normalization on reopen. The next block therefore shifts from proving the live boundary exists to making fetched data portable and reusable while keeping point-in-time universes explicitly deferred.
+
+### Week 29
+
+- Objective: checkpoint the post-M7 data-capture direction and freeze the first persisted snapshot slice.
+- Confidence: `Medium`
+- Planning status: `Fixed`
+- Scope:
+  - review the Week 28 real-fetch smoke outcome and confirm the next ownership boundary belongs in `trendlab-data`
+  - decide the first persisted snapshot write surface and where operator entrypoints should live
+  - re-confirm that point-in-time universes remain blocked on the same prerequisite model
+- Deliverables/artifacts:
+  - updated snapshot-capture checkpoint in `docs/Plan.md`, `docs/Roadmap.md`, and `docs/Status.md`
+  - frozen first-slice contract for persisted snapshot capture and reopen flow
+- Validation/checks:
+  - the next live-data step stays outside `cargo xtask validate`
+  - snapshot ownership remains in shared/data-layer code instead of CLI-local truth
+- Exit criteria:
+  - the first persisted snapshot slice is concrete enough to implement without reopening the post-M7 planning questions
+- Non-goals:
+  - point-in-time universe membership
+  - broad live-data orchestration beyond one truthful snapshot path
+- Dependencies/blockers:
+  - Week 28 complete
+
+### Week 30
+
+- Objective: persist the first live-fetched symbol-history snapshot through the documented ownership path.
+- Confidence: `Medium`
+- Planning status: `Provisional`
+- Scope:
+  - add the first snapshot write and load helpers in `trendlab-data` on top of the existing Tiingo live fetch boundary
+  - persist provider identity, requested date window, stored raw bars, and stored corporate actions in the frozen `snapshot.json` plus `daily/*.jsonl` and `actions/*.jsonl` layout
+  - expose a narrow `cargo xtask` capture entrypoint for optional live snapshot capture
+- Deliverables/artifacts:
+  - persisted live-snapshot write path
+  - deterministic tests covering snapshot write and reopen compatibility on synthetic or fixture-backed stored symbol data
+- Validation/checks:
+  - captured snapshots reopen without a second provider call
+  - persisted snapshot data preserves the same provider and action truth used during capture
+  - `cargo xtask validate`
+- Exit criteria:
+  - one truthful live-snapshot capture path exists and can be reopened offline
+- Non-goals:
+  - point-in-time universes
+  - multi-provider breadth
+- Dependencies/blockers:
+  - Week 29 checkpoint
+- Risk note:
+  - the documented cache layout may pressure dependency or schema choices once the first persisted write path is real instead of aspirational.
+
+### Week 31
+
+- Objective: make stored snapshots inspectable and auditable without refetching live data.
+- Confidence: `Medium`
+- Planning status: `Provisional`
+- Scope:
+  - add reopen helpers and an audit-first inspect path for persisted snapshots on top of the Week 30 snapshot format
+  - surface provider identity, action counts, and normalization-sensitive fields explicitly
+  - keep reopen behavior shared or data-layer-owned instead of duplicating snapshot parsing in the CLI or TUI
+- Deliverables/artifacts:
+  - snapshot reopen path
+  - `xtask` or data-layer-backed inspect coverage for stored snapshots
+- Validation/checks:
+  - snapshot inspection works offline after capture
+  - audit output still traces back to stored raw bars and corporate actions explicitly
+  - `cargo xtask validate`
+- Exit criteria:
+  - stored snapshots can be reopened and inspected honestly without a provider round-trip
+- Non-goals:
+  - point-in-time universes
+  - UI-heavy live-data polish
+- Dependencies/blockers:
+  - Week 30 snapshot capture
+- Risk note:
+  - snapshot inspection may expose missing provenance fields or an inconvenient on-disk layout that needs one more normalization pass.
+
+### Week 32
+
+- Objective: connect the first stored-snapshot path back into operator workflows and close the M8 checkpoint honestly.
+- Confidence: `Low`
+- Planning status: `Provisional`
+- Scope:
+  - allow an operator-facing CLI run or audit path to target stored snapshots explicitly where that improves honesty over ad hoc live fetches
+  - confirm the stored-snapshot flow still keeps provider-native types out of `trendlab-core`
+  - decide whether M8 is complete without point-in-time universes and record the next horizon
+- Deliverables/artifacts:
+  - snapshot-backed operator flow
+  - M8 checkpoint decision and next-horizon note
+- Validation/checks:
+  - stored snapshots can feed operator workflows without creating CLI-owned market-data truth
+  - default validation remains deterministic and network-free
+  - point-in-time universes are still deferred unless the prerequisite model materially changes
+- Exit criteria:
+  - M8 closes honestly with a reusable snapshot path, or the remaining work is explicitly re-baselined
+- Non-goals:
+  - point-in-time universe implementation
+  - broad live-data health dashboards
+- Dependencies/blockers:
+  - Weeks 29-31
+- Risk note:
+  - the right outcome may still be a narrower M8 close if snapshot-backed operator flows expose more contract work than expected.
+
 ## Backlog After the Roadmap
 
 These items are intentionally outside the current planned sequence unless a later re-baseline pulls them forward:
@@ -837,6 +1069,7 @@ These items are intentionally outside the current planned sequence unless a late
 - broader Monte Carlo and execution-noise search
 - cloud execution workflows
 - portfolio breadth beyond what is needed for the research layer
+- point-in-time universe implementation before an honest universe snapshot representation and historical-membership model exist
 - live data-health and provenance badges beyond the minimum audit surfaces
 - advanced chart overlays beyond the first audit-capable TUI shell
 
@@ -844,7 +1077,7 @@ These items are intentionally outside the current planned sequence unless a late
 
 Use this checklist whenever the roadmap is revised:
 
-- every milestone from M1 through M6 has weekly slices
+- every milestone from M1 through M8 has weekly slices
 - no week asks the implementer to invent acceptance criteria
 - Week 0 owns the current open design decisions and initial golden-scenario choices
 - every week includes explicit validation and exit criteria

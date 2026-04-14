@@ -8,19 +8,43 @@ use trendlab_artifact::{
     DateRange, ManifestParameter, PersistedLedgerRow, ReferenceFlowDefinition, RunManifest,
     RunSummary, SCHEMA_VERSION, write_replay_bundle,
 };
-use trendlab_core::engine::{ReferenceFlowSpec, RunRequest, RunResult, run_reference_flow};
+use trendlab_core::engine::{
+    ReferenceFlowSpec, RunRequest, RunResult, StrategyRunRequest, run_reference_flow,
+    run_strategy_flow,
+};
 use trendlab_core::market::DailyBar;
 use trendlab_core::orders::{EntryIntent, GapPolicy, OrderIntent};
+use trendlab_core::strategy::{
+    CloseConfirmedBreakoutSignal, CompositeStrategy, ExecutionModel, FilterDecision,
+    KeepPositionManager, NextOpenLongExecution, PassFilter, PositionDecision, PositionManager,
+    SignalDecision, SignalFilter, SignalGenerator, StopEntryBreakoutSignal, StopEntryLongExecution,
+    StrategyContext,
+};
 
 pub const M1_ENTRY_HOLD_OPEN_POSITION: &str = "m1_entry_hold_open_position";
 pub const M1_INTRABAR_STOP_EXIT: &str = "m1_intrabar_stop_exit";
 pub const M1_GAP_THROUGH_STOP_EXIT: &str = "m1_gap_through_stop_exit";
+pub const M3_CLOSE_CONFIRMED_NEXT_OPEN_ENTRY: &str = "m3_close_confirmed_next_open_entry";
+pub const M3_FILTER_BLOCKED_BREAKOUT: &str = "m3_filter_blocked_breakout";
+pub const M3_STOP_ENTRY_PENDING_DUPLICATE_BLOCK: &str = "m3_stop_entry_pending_duplicate_block";
 
 pub const FROZEN_M1_SCENARIOS: [&str; 3] = [
     M1_ENTRY_HOLD_OPEN_POSITION,
     M1_INTRABAR_STOP_EXIT,
     M1_GAP_THROUGH_STOP_EXIT,
 ];
+
+pub const STRATEGY_FIXTURE_SCENARIOS: [&str; 3] = [
+    M3_CLOSE_CONFIRMED_NEXT_OPEN_ENTRY,
+    M3_FILTER_BLOCKED_BREAKOUT,
+    M3_STOP_ENTRY_PENDING_DUPLICATE_BLOCK,
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FixtureMode {
+    ReferenceFlow,
+    StrategyFlow,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ScenarioManifest {
@@ -31,6 +55,17 @@ pub struct ScenarioManifest {
     pub protective_stop_fraction: f64,
     pub oracle: bool,
     pub gap_policy: GapPolicy,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct StrategyScenarioManifest {
+    pub scenario: ScenarioManifest,
+    pub signal_id: String,
+    pub signal_lookback_bars: usize,
+    pub filter_id: String,
+    pub filter_reason_code: Option<String>,
+    pub position_manager_id: String,
+    pub execution_model_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,6 +79,23 @@ pub struct ScenarioPaths {
 
 pub mod fixtures {
     use super::*;
+
+    pub fn load_fixture_mode(name: &str) -> Result<FixtureMode, String> {
+        let paths = scenario_paths(name);
+        let raw = fs::read_to_string(&paths.manifest)
+            .map_err(|err| format!("failed to read {}: {err}", paths.manifest.display()))?;
+        let map = parse_key_value_file(&raw)?;
+
+        match map
+            .get("mode")
+            .map(String::as_str)
+            .unwrap_or("reference_flow")
+        {
+            "reference_flow" => Ok(FixtureMode::ReferenceFlow),
+            "strategy_flow" => Ok(FixtureMode::StrategyFlow),
+            other => Err(format!("unknown fixture mode `{other}`")),
+        }
+    }
 
     pub fn workspace_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -109,6 +161,41 @@ pub mod fixtures {
             entry_intents: load_entry_intents(name)?,
             reference_flow: load_reference_flow_spec(name)?,
             gap_policy: manifest.gap_policy,
+        })
+    }
+
+    pub fn load_strategy_manifest(name: &str) -> Result<StrategyScenarioManifest, String> {
+        let paths = scenario_paths(name);
+        let raw = fs::read_to_string(&paths.manifest)
+            .map_err(|err| format!("failed to read {}: {err}", paths.manifest.display()))?;
+        let map = parse_key_value_file(&raw)?;
+
+        Ok(StrategyScenarioManifest {
+            scenario: load_manifest(name)?,
+            signal_id: required(&map, "strategy.signal_id")?.to_string(),
+            signal_lookback_bars: required(&map, "strategy.signal_lookback_bars")?
+                .parse::<usize>()
+                .map_err(|_| "invalid integer for `strategy.signal_lookback_bars`".to_string())?,
+            filter_id: required(&map, "strategy.filter_id")?.to_string(),
+            filter_reason_code: map.get("strategy.filter_reason_code").cloned(),
+            position_manager_id: required(&map, "strategy.position_manager_id")?.to_string(),
+            execution_model_id: required(&map, "strategy.execution_model_id")?.to_string(),
+        })
+    }
+
+    pub fn load_strategy_run_request(name: &str) -> Result<StrategyRunRequest, String> {
+        let manifest = load_strategy_manifest(name)?;
+
+        Ok(StrategyRunRequest {
+            symbol: manifest.scenario.symbol,
+            bars: load_bars(name)?,
+            reference_flow: ReferenceFlowSpec {
+                initial_cash: manifest.scenario.initial_cash,
+                entry_shares: manifest.scenario.entry_shares,
+                protective_stop_fraction: manifest.scenario.protective_stop_fraction,
+                cost_model: trendlab_core::accounting::CostModel::default(),
+            },
+            gap_policy: manifest.scenario.gap_policy,
         })
     }
 
@@ -345,6 +432,27 @@ pub mod golden {
         Ok(())
     }
 
+    pub fn assert_strategy_reconciles(rows: &[PersistedLedgerRow]) -> Result<(), String> {
+        for row in rows {
+            let expected_equity = round4(row.cash + row.raw_close * f64::from(row.position_shares));
+            if round4(row.equity) != expected_equity {
+                return Err(format!(
+                    "equity reconciliation failed on {}: expected {}, got {}",
+                    row.date, expected_equity, row.equity
+                ));
+            }
+
+            if row.position_shares == 0 && row.next_stop.is_some() {
+                return Err(format!(
+                    "flat rows must not carry a next_stop on {}",
+                    row.date
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
     fn round4(value: f64) -> f64 {
         (value * 10_000.0).round() / 10_000.0
     }
@@ -362,7 +470,120 @@ pub mod oracle {
 pub mod bundle {
     use super::*;
 
+    #[derive(Clone, Debug, PartialEq)]
+    struct FixtureBlockFilter {
+        reason_code: String,
+    }
+
+    impl SignalFilter for FixtureBlockFilter {
+        fn evaluate(
+            &self,
+            _context: &StrategyContext<'_>,
+            signal: &SignalDecision,
+        ) -> FilterDecision {
+            match signal {
+                SignalDecision::None => FilterDecision::Pass,
+                _ => FilterDecision::Block {
+                    reason_code: self.reason_code.clone(),
+                },
+            }
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    struct FixtureProtectiveStopPositionManager {
+        protective_stop_fraction: f64,
+    }
+
+    impl PositionManager for FixtureProtectiveStopPositionManager {
+        fn evaluate(&self, context: &StrategyContext<'_>) -> PositionDecision {
+            if context.position.shares == 0 || context.position.active_stop.is_some() {
+                return PositionDecision::Keep;
+            }
+
+            let Some(entry_price) = context.position.entry_price else {
+                return PositionDecision::Keep;
+            };
+
+            PositionDecision::SetProtectiveStop {
+                stop_price: entry_price * (1.0 - self.protective_stop_fraction),
+                reason_code: "strategy_protective_stop_set".to_string(),
+            }
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    enum FixtureSignal {
+        CloseConfirmed(CloseConfirmedBreakoutSignal),
+        StopEntry(StopEntryBreakoutSignal),
+    }
+
+    impl SignalGenerator for FixtureSignal {
+        fn evaluate(&self, context: &StrategyContext<'_>) -> SignalDecision {
+            match self {
+                Self::CloseConfirmed(signal) => signal.evaluate(context),
+                Self::StopEntry(signal) => signal.evaluate(context),
+            }
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    enum FixtureFilter {
+        Pass(PassFilter),
+        Block(FixtureBlockFilter),
+    }
+
+    impl SignalFilter for FixtureFilter {
+        fn evaluate(
+            &self,
+            context: &StrategyContext<'_>,
+            signal: &SignalDecision,
+        ) -> FilterDecision {
+            match self {
+                Self::Pass(filter) => filter.evaluate(context, signal),
+                Self::Block(filter) => filter.evaluate(context, signal),
+            }
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    enum FixturePositionManager {
+        Keep(KeepPositionManager),
+        FixedProtectiveStop(FixtureProtectiveStopPositionManager),
+    }
+
+    impl PositionManager for FixturePositionManager {
+        fn evaluate(&self, context: &StrategyContext<'_>) -> PositionDecision {
+            match self {
+                Self::Keep(manager) => manager.evaluate(context),
+                Self::FixedProtectiveStop(manager) => manager.evaluate(context),
+            }
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    enum FixtureExecutionModel {
+        NextOpen(NextOpenLongExecution),
+        StopEntry(StopEntryLongExecution),
+    }
+
+    impl ExecutionModel for FixtureExecutionModel {
+        fn evaluate(
+            &self,
+            context: &StrategyContext<'_>,
+            signal: &SignalDecision,
+            filter: &FilterDecision,
+            position: &PositionDecision,
+        ) -> trendlab_core::strategy::ExecutionDecision {
+            match self {
+                Self::NextOpen(model) => model.evaluate(context, signal, filter, position),
+                Self::StopEntry(model) => model.evaluate(context, signal, filter, position),
+            }
+        }
+    }
+
     pub fn build_manifest(name: &str) -> Result<RunManifest, String> {
+        let fixture_mode = fixtures::load_fixture_mode(name)?;
         let scenario = fixtures::load_manifest(name)?;
         let bars = fixtures::load_bars(name)?;
         let first_bar = bars
@@ -385,14 +606,14 @@ pub mod bundle {
                 end_date: last_bar.date.clone(),
             },
             reference_flow: ReferenceFlowDefinition {
-                kind: "m1_reference_flow".to_string(),
+                kind: match fixture_mode {
+                    FixtureMode::ReferenceFlow => "m1_reference_flow".to_string(),
+                    FixtureMode::StrategyFlow => "strategy_flow".to_string(),
+                },
                 entry_shares: scenario.entry_shares,
                 protective_stop_fraction: scenario.protective_stop_fraction,
             },
-            parameters: vec![ManifestParameter {
-                name: "fixture_scenario".to_string(),
-                value: name.to_string(),
-            }],
+            parameters: build_manifest_parameters(name, fixture_mode)?,
             cost_model: trendlab_core::accounting::CostModel::default(),
             gap_policy: scenario.gap_policy,
             seed: None,
@@ -414,8 +635,13 @@ pub mod bundle {
     }
 
     pub fn write_fixture_bundle(name: &str, bundle_dir: &Path) -> Result<(), String> {
-        let request = fixtures::load_run_request(name)?;
-        let result = run_reference_flow(&request).map_err(|err| err.to_string())?;
+        let result = match fixtures::load_fixture_mode(name)? {
+            FixtureMode::ReferenceFlow => {
+                let request = fixtures::load_run_request(name)?;
+                run_reference_flow(&request).map_err(|err| err.to_string())?
+            }
+            FixtureMode::StrategyFlow => run_strategy_fixture(name)?,
+        };
         let manifest = build_manifest(name)?;
         let summary = build_summary(&result, manifest.warnings.len());
         let ledger = persisted_ledger(&result);
@@ -424,6 +650,110 @@ pub mod bundle {
             .map_err(|err| err.to_string())?;
 
         Ok(())
+    }
+
+    fn build_manifest_parameters(
+        name: &str,
+        fixture_mode: FixtureMode,
+    ) -> Result<Vec<ManifestParameter>, String> {
+        let mut parameters = vec![ManifestParameter {
+            name: "fixture_scenario".to_string(),
+            value: name.to_string(),
+        }];
+
+        if fixture_mode == FixtureMode::StrategyFlow {
+            let manifest = fixtures::load_strategy_manifest(name)?;
+            parameters.extend([
+                ManifestParameter {
+                    name: "strategy.signal_id".to_string(),
+                    value: manifest.signal_id,
+                },
+                ManifestParameter {
+                    name: "strategy.filter_id".to_string(),
+                    value: manifest.filter_id,
+                },
+                ManifestParameter {
+                    name: "strategy.position_manager_id".to_string(),
+                    value: manifest.position_manager_id,
+                },
+                ManifestParameter {
+                    name: "strategy.execution_model_id".to_string(),
+                    value: manifest.execution_model_id,
+                },
+            ]);
+        }
+
+        Ok(parameters)
+    }
+
+    pub(crate) fn run_strategy_fixture(name: &str) -> Result<RunResult, String> {
+        let request = fixtures::load_strategy_run_request(name)?;
+        let manifest = fixtures::load_strategy_manifest(name)?;
+        let strategy = CompositeStrategy::new(
+            build_signal(&manifest)?,
+            build_filter(&manifest)?,
+            build_position_manager(&manifest),
+            build_execution_model(&manifest)?,
+        );
+
+        run_strategy_flow(&request, &strategy).map_err(|err| err.to_string())
+    }
+
+    fn build_signal(manifest: &StrategyScenarioManifest) -> Result<FixtureSignal, String> {
+        match manifest.signal_id.as_str() {
+            "close_confirmed_breakout" => Ok(FixtureSignal::CloseConfirmed(
+                CloseConfirmedBreakoutSignal::with_signal_id(
+                    manifest.signal_lookback_bars,
+                    manifest.signal_id.clone(),
+                ),
+            )),
+            "stop_entry_breakout" => Ok(FixtureSignal::StopEntry(
+                StopEntryBreakoutSignal::with_signal_id(
+                    manifest.signal_lookback_bars,
+                    manifest.signal_id.clone(),
+                ),
+            )),
+            other => Err(format!("unsupported strategy.signal_id `{other}`")),
+        }
+    }
+
+    fn build_filter(manifest: &StrategyScenarioManifest) -> Result<FixtureFilter, String> {
+        match manifest.filter_id.as_str() {
+            "pass_filter" => Ok(FixtureFilter::Pass(PassFilter)),
+            "fixture_block_filter" => {
+                let reason_code = manifest.filter_reason_code.clone().ok_or_else(|| {
+                    "strategy.filter_reason_code is required for fixture_block_filter".to_string()
+                })?;
+                Ok(FixtureFilter::Block(FixtureBlockFilter { reason_code }))
+            }
+            other => Err(format!("unsupported strategy.filter_id `{other}`")),
+        }
+    }
+
+    fn build_position_manager(manifest: &StrategyScenarioManifest) -> FixturePositionManager {
+        match manifest.position_manager_id.as_str() {
+            "keep_position_manager" => FixturePositionManager::Keep(KeepPositionManager),
+            "fixed_protective_stop" => {
+                FixturePositionManager::FixedProtectiveStop(FixtureProtectiveStopPositionManager {
+                    protective_stop_fraction: manifest.scenario.protective_stop_fraction,
+                })
+            }
+            other => panic!("unsupported strategy.position_manager_id `{other}`"),
+        }
+    }
+
+    fn build_execution_model(
+        manifest: &StrategyScenarioManifest,
+    ) -> Result<FixtureExecutionModel, String> {
+        match manifest.execution_model_id.as_str() {
+            "next_open_long" => Ok(FixtureExecutionModel::NextOpen(NextOpenLongExecution::new(
+                manifest.scenario.entry_shares,
+            ))),
+            "stop_entry_long" => Ok(FixtureExecutionModel::StopEntry(
+                StopEntryLongExecution::new(manifest.scenario.entry_shares),
+            )),
+            other => Err(format!("unsupported strategy.execution_model_id `{other}`")),
+        }
     }
 }
 
@@ -443,7 +773,8 @@ mod tests {
     use super::golden;
     use super::{
         FROZEN_M1_SCENARIOS, M1_ENTRY_HOLD_OPEN_POSITION, M1_GAP_THROUGH_STOP_EXIT,
-        M1_INTRABAR_STOP_EXIT,
+        M1_INTRABAR_STOP_EXIT, M3_CLOSE_CONFIRMED_NEXT_OPEN_ENTRY,
+        M3_STOP_ENTRY_PENDING_DUPLICATE_BLOCK, STRATEGY_FIXTURE_SCENARIOS,
     };
 
     #[test]
@@ -569,5 +900,117 @@ mod tests {
             let ledger = fixtures::load_expected_ledger(name).unwrap();
             golden::assert_m1_reconciles(&ledger).unwrap();
         }
+    }
+
+    #[test]
+    fn strategy_fixture_scenarios_have_expected_files() {
+        for name in STRATEGY_FIXTURE_SCENARIOS {
+            let paths = fixtures::scenario_paths(name);
+            assert!(
+                paths.root.is_dir(),
+                "missing strategy scenario dir for {name}"
+            );
+            assert!(
+                paths.manifest.is_file(),
+                "missing strategy scenario manifest for {name}"
+            );
+            assert!(paths.bars.is_file(), "missing strategy bars.csv for {name}");
+            assert!(
+                paths.expected_ledger.is_file(),
+                "missing strategy expected-ledger.csv for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn strategy_fixture_inputs_load_deterministically() {
+        let manifest =
+            fixtures::load_strategy_manifest(M3_CLOSE_CONFIRMED_NEXT_OPEN_ENTRY).unwrap();
+        let request =
+            fixtures::load_strategy_run_request(M3_CLOSE_CONFIRMED_NEXT_OPEN_ENTRY).unwrap();
+
+        assert_eq!(manifest.signal_id, "close_confirmed_breakout");
+        assert_eq!(manifest.execution_model_id, "next_open_long");
+        assert_eq!(request.reference_flow.entry_shares, 1);
+        assert_eq!(request.bars.len(), 5);
+    }
+
+    #[test]
+    fn strategy_oracle_ledger_loads_for_pending_duplicate_case() {
+        let manifest =
+            fixtures::load_strategy_manifest(M3_STOP_ENTRY_PENDING_DUPLICATE_BLOCK).unwrap();
+        let ledger = fixtures::load_expected_ledger(M3_STOP_ENTRY_PENDING_DUPLICATE_BLOCK).unwrap();
+
+        assert!(manifest.scenario.oracle);
+        assert_eq!(golden::persisted_row_count(&ledger), 4);
+        assert_eq!(
+            ledger[2].reason_codes.first().map(String::as_str),
+            Some("stop_entry_order_carried")
+        );
+    }
+
+    #[test]
+    fn strategy_fixture_runs_match_expected_ledgers() {
+        for name in STRATEGY_FIXTURE_SCENARIOS {
+            let actual = bundle::run_strategy_fixture(name).unwrap();
+            let expected = fixtures::load_expected_ledger(name).unwrap();
+            let persisted: Vec<_> = actual.ledger.iter().map(PersistedLedgerRow::from).collect();
+
+            golden::assert_strategy_reconciles(&persisted).unwrap();
+            assert_eq!(persisted, expected, "strategy ledger mismatch for {name}");
+        }
+    }
+
+    #[test]
+    fn strategy_fixture_replay_bundles_round_trip() {
+        for name in STRATEGY_FIXTURE_SCENARIOS {
+            let bundle_dir = test_output_dir(name);
+
+            bundle::write_fixture_bundle(name, &bundle_dir).unwrap();
+
+            let loaded = load_replay_bundle(&bundle_dir).unwrap();
+            let expected = fixtures::load_expected_ledger(name).unwrap();
+
+            golden::assert_strategy_reconciles(&loaded.ledger).unwrap();
+            assert_eq!(
+                loaded.ledger, expected,
+                "loaded strategy ledger mismatch for {name}"
+            );
+            assert_eq!(loaded.summary.row_count, expected.len());
+            assert_eq!(loaded.manifest.schema_version, SCHEMA_VERSION);
+
+            fs::remove_dir_all(bundle_dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn strategy_fixture_bundles_include_standardized_strategy_parameters() {
+        let bundle_dir = test_output_dir("strategy-bundle-parameters");
+
+        bundle::write_fixture_bundle(M3_CLOSE_CONFIRMED_NEXT_OPEN_ENTRY, &bundle_dir).unwrap();
+
+        let loaded = load_replay_bundle(&bundle_dir).unwrap();
+        let mut parameters = loaded
+            .manifest
+            .parameters
+            .iter()
+            .map(|parameter| (parameter.name.as_str(), parameter.value.as_str()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        assert_eq!(
+            parameters.remove("strategy.signal_id"),
+            Some("close_confirmed_breakout")
+        );
+        assert_eq!(parameters.remove("strategy.filter_id"), Some("pass_filter"));
+        assert_eq!(
+            parameters.remove("strategy.position_manager_id"),
+            Some("fixed_protective_stop")
+        );
+        assert_eq!(
+            parameters.remove("strategy.execution_model_id"),
+            Some("next_open_long")
+        );
+
+        fs::remove_dir_all(bundle_dir).unwrap();
     }
 }

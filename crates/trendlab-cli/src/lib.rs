@@ -58,15 +58,22 @@ impl Error for CliError {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RunOptions {
-    request_path: PathBuf,
+    input_source: RunInputSource,
     output_dir: PathBuf,
-    provider_identity: ProviderIdentity,
+    provider_identity: Option<ProviderIdentity>,
     snapshot_id: Option<String>,
-    engine_version: String,
+    engine_version: Option<String>,
     strategy_components: Option<StrategyComponentLabels>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+enum RunInputSource {
+    Request(PathBuf),
+    Spec(PathBuf),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StrategyComponentLabels {
     signal_id: String,
     filter_id: String,
@@ -81,6 +88,57 @@ impl StrategyComponentLabels {
             self.signal_id, self.filter_id, self.position_manager_id, self.execution_model_id
         )
     }
+
+    fn manifest_parameters(&self) -> [ManifestParameter; 4] {
+        [
+            ManifestParameter {
+                name: STRATEGY_SIGNAL_PARAMETER.to_string(),
+                value: self.signal_id.clone(),
+            },
+            ManifestParameter {
+                name: STRATEGY_FILTER_PARAMETER.to_string(),
+                value: self.filter_id.clone(),
+            },
+            ManifestParameter {
+                name: STRATEGY_POSITION_PARAMETER.to_string(),
+                value: self.position_manager_id.clone(),
+            },
+            ManifestParameter {
+                name: STRATEGY_EXECUTION_PARAMETER.to_string(),
+                value: self.execution_model_id.clone(),
+            },
+        ]
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OperatorRunManifestSpec {
+    provider_identity: Option<ProviderIdentity>,
+    snapshot_id: Option<String>,
+    engine_version: Option<String>,
+    strategy_components: Option<StrategyComponentLabels>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OperatorRunSpec {
+    request_path: Option<String>,
+    request: Option<RunRequest>,
+    #[serde(default)]
+    manifest: OperatorRunManifestSpec,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ResolvedRunInput {
+    request: RunRequest,
+    request_source: String,
+    spec_source: Option<String>,
+    default_snapshot_source: PathBuf,
+    provider_identity: ProviderIdentity,
+    snapshot_id: Option<String>,
+    engine_version: String,
+    strategy_components: Option<StrategyComponentLabels>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -170,7 +228,8 @@ struct ResearchBundleExpectation<'a> {
     historical_limitations: &'a str,
 }
 
-const RUN_USAGE: &str = "usage: trendlab-cli run --request <path> --output <dir> [--provider <fixture|tiingo>] [--snapshot-id <id>] [--engine-version <version>] [--signal-id <id> --filter-id <id> --position-manager-id <id> --execution-model-id <id>]";
+const DEFAULT_ENGINE_VERSION: &str = "m1-reference-flow";
+const RUN_USAGE: &str = "usage: trendlab-cli run (--request <path> [--provider <fixture|tiingo>] [--snapshot-id <id>] [--engine-version <version>] [--signal-id <id> --filter-id <id> --position-manager-id <id> --execution-model-id <id>] | --spec <path>) --output <dir>";
 const EXPLAIN_USAGE: &str = "usage: trendlab-cli explain <bundle-dir>";
 const DIFF_USAGE: &str = "usage: trendlab-cli diff <left-bundle-dir> <right-bundle-dir>";
 const AUDIT_DATA_USAGE: &str = "usage: trendlab-cli audit data <bundle-dir>";
@@ -184,6 +243,8 @@ const STRATEGY_SIGNAL_PARAMETER: &str = "strategy.signal_id";
 const STRATEGY_FILTER_PARAMETER: &str = "strategy.filter_id";
 const STRATEGY_POSITION_PARAMETER: &str = "strategy.position_manager_id";
 const STRATEGY_EXECUTION_PARAMETER: &str = "strategy.execution_model_id";
+const RUN_REQUEST_SOURCE_PARAMETER: &str = "run_request_source";
+const RUN_SPEC_SOURCE_PARAMETER: &str = "run_spec_source";
 
 pub fn dispatch<I, S>(args: I) -> CliResponse
 where
@@ -228,9 +289,10 @@ fn usage_response() -> CliResponse {
 
 fn run_command(args: Vec<String>) -> Result<String, CliError> {
     let options = parse_run_options(args)?;
-    let request = read_run_request(&options.request_path)?;
-    let result = run_reference_flow(&request).map_err(|err| CliError::invalid(err.to_string()))?;
-    let manifest = build_manifest(&request, &options)?;
+    let input = resolve_run_input(&options)?;
+    let result =
+        run_reference_flow(&input.request).map_err(|err| CliError::invalid(err.to_string()))?;
+    let manifest = build_manifest(&input)?;
     let summary = RunSummary {
         row_count: result.ledger.len(),
         warning_count: manifest.warnings.len(),
@@ -1945,10 +2007,11 @@ fn format_research_leaderboard_report(report: &ResearchLeaderboardReport) -> Str
 
 fn parse_run_options(args: Vec<String>) -> Result<RunOptions, CliError> {
     let mut request_path = None;
+    let mut spec_path = None;
     let mut output_dir = None;
-    let mut provider_identity = ProviderIdentity::Fixture;
+    let mut provider_identity = None;
     let mut snapshot_id = None;
-    let mut engine_version = "m1-reference-flow".to_string();
+    let mut engine_version = None;
     let mut signal_id = None;
     let mut filter_id = None;
     let mut position_manager_id = None;
@@ -1958,21 +2021,23 @@ fn parse_run_options(args: Vec<String>) -> Result<RunOptions, CliError> {
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--request" => request_path = iter.next().map(PathBuf::from),
+            "--spec" => spec_path = iter.next().map(PathBuf::from),
             "--output" => output_dir = iter.next().map(PathBuf::from),
             "--provider" => {
                 let Some(raw_provider) = iter.next() else {
                     return Err(CliError::invalid(RUN_USAGE));
                 };
-                provider_identity = ProviderIdentity::parse(&raw_provider).ok_or_else(|| {
-                    CliError::invalid(format!("unknown provider `{raw_provider}`"))
-                })?;
+                provider_identity =
+                    Some(ProviderIdentity::parse(&raw_provider).ok_or_else(|| {
+                        CliError::invalid(format!("unknown provider `{raw_provider}`"))
+                    })?);
             }
             "--snapshot-id" => snapshot_id = iter.next(),
             "--engine-version" => {
                 let Some(value) = iter.next() else {
                     return Err(CliError::invalid(RUN_USAGE));
                 };
-                engine_version = value;
+                engine_version = Some(value);
             }
             "--signal-id" => signal_id = iter.next(),
             "--filter-id" => filter_id = iter.next(),
@@ -1986,11 +2051,13 @@ fn parse_run_options(args: Vec<String>) -> Result<RunOptions, CliError> {
         }
     }
 
-    let Some(request_path) = request_path else {
-        return Err(CliError::invalid(RUN_USAGE));
-    };
     let Some(output_dir) = output_dir else {
         return Err(CliError::invalid(RUN_USAGE));
+    };
+    let input_source = match (request_path, spec_path) {
+        (Some(request_path), None) => RunInputSource::Request(request_path),
+        (None, Some(spec_path)) => RunInputSource::Spec(spec_path),
+        _ => return Err(CliError::invalid(RUN_USAGE)),
     };
     let strategy_components = match (
         signal_id,
@@ -2013,9 +2080,19 @@ fn parse_run_options(args: Vec<String>) -> Result<RunOptions, CliError> {
             ));
         }
     };
+    if matches!(input_source, RunInputSource::Spec(_))
+        && (provider_identity.is_some()
+            || snapshot_id.is_some()
+            || engine_version.is_some()
+            || strategy_components.is_some())
+    {
+        return Err(CliError::invalid(
+            "run --spec cannot be combined with --provider, --snapshot-id, --engine-version, or strategy-component flags",
+        ));
+    }
 
     Ok(RunOptions {
-        request_path,
+        input_source,
         output_dir,
         provider_identity,
         snapshot_id,
@@ -2029,56 +2106,133 @@ fn read_run_request(path: &Path) -> Result<RunRequest, CliError> {
     serde_json::from_str(&raw).map_err(|err| CliError::json("failed to parse", path, &err))
 }
 
-fn build_manifest(request: &RunRequest, options: &RunOptions) -> Result<RunManifest, CliError> {
-    let first_bar = request
+fn read_run_spec(path: &Path) -> Result<OperatorRunSpec, CliError> {
+    let raw = fs::read_to_string(path).map_err(|err| CliError::io("failed to read", path, &err))?;
+    serde_json::from_str(&raw).map_err(|err| CliError::json("failed to parse", path, &err))
+}
+
+fn resolve_run_input(options: &RunOptions) -> Result<ResolvedRunInput, CliError> {
+    match &options.input_source {
+        RunInputSource::Request(request_path) => Ok(ResolvedRunInput {
+            request: read_run_request(request_path)?,
+            request_source: request_source_label_from_path(request_path),
+            spec_source: None,
+            default_snapshot_source: request_path.clone(),
+            provider_identity: options
+                .provider_identity
+                .unwrap_or(ProviderIdentity::Fixture),
+            snapshot_id: options.snapshot_id.clone(),
+            engine_version: options
+                .engine_version
+                .clone()
+                .unwrap_or_else(|| DEFAULT_ENGINE_VERSION.to_string()),
+            strategy_components: options.strategy_components.clone(),
+        }),
+        RunInputSource::Spec(spec_path) => resolve_run_spec_input(spec_path),
+    }
+}
+
+fn resolve_run_spec_input(spec_path: &Path) -> Result<ResolvedRunInput, CliError> {
+    let spec = read_run_spec(spec_path)?;
+    let (request, request_source, default_snapshot_source) = match (spec.request_path, spec.request)
+    {
+        (Some(request_path), None) => {
+            let resolved_request_path = resolve_spec_relative_path(spec_path, &request_path);
+            (
+                read_run_request(&resolved_request_path)?,
+                request_path,
+                resolved_request_path,
+            )
+        }
+        (None, Some(request)) => (request, "inline".to_string(), spec_path.to_path_buf()),
+        (Some(_), Some(_)) => {
+            return Err(CliError::invalid(
+                "run spec must define exactly one of `request_path` or `request`",
+            ));
+        }
+        (None, None) => {
+            return Err(CliError::invalid(
+                "run spec must include either `request_path` or `request`",
+            ));
+        }
+    };
+
+    Ok(ResolvedRunInput {
+        request,
+        request_source,
+        spec_source: Some(source_file_label(spec_path)),
+        default_snapshot_source,
+        provider_identity: spec
+            .manifest
+            .provider_identity
+            .unwrap_or(ProviderIdentity::Fixture),
+        snapshot_id: spec.manifest.snapshot_id,
+        engine_version: spec
+            .manifest
+            .engine_version
+            .unwrap_or_else(|| DEFAULT_ENGINE_VERSION.to_string()),
+        strategy_components: spec.manifest.strategy_components,
+    })
+}
+
+fn resolve_spec_relative_path(spec_path: &Path, raw_path: &str) -> PathBuf {
+    let request_path = Path::new(raw_path);
+    if request_path.is_absolute() {
+        request_path.to_path_buf()
+    } else {
+        spec_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(request_path)
+    }
+}
+
+fn request_source_label_from_path(path: &Path) -> String {
+    source_file_label(path)
+}
+
+fn source_file_label(path: &Path) -> String {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("request.json")
+        .to_string()
+}
+
+fn build_manifest(input: &ResolvedRunInput) -> Result<RunManifest, CliError> {
+    let first_bar = input
+        .request
         .bars
         .first()
         .ok_or_else(|| CliError::invalid("run requests must include at least one daily bar"))?;
-    let last_bar = request
+    let last_bar = input
+        .request
         .bars
         .last()
         .ok_or_else(|| CliError::invalid("run requests must include at least one daily bar"))?;
-    let request_source = options
-        .request_path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("request.json")
-        .to_string();
     let mut parameters = vec![ManifestParameter {
-        name: "run_request_source".to_string(),
-        value: request_source,
+        name: RUN_REQUEST_SOURCE_PARAMETER.to_string(),
+        value: input.request_source.clone(),
     }];
+    if let Some(spec_source) = &input.spec_source {
+        parameters.push(ManifestParameter {
+            name: RUN_SPEC_SOURCE_PARAMETER.to_string(),
+            value: spec_source.clone(),
+        });
+    }
 
-    if let Some(strategy_components) = &options.strategy_components {
-        parameters.extend([
-            ManifestParameter {
-                name: STRATEGY_SIGNAL_PARAMETER.to_string(),
-                value: strategy_components.signal_id.clone(),
-            },
-            ManifestParameter {
-                name: STRATEGY_FILTER_PARAMETER.to_string(),
-                value: strategy_components.filter_id.clone(),
-            },
-            ManifestParameter {
-                name: STRATEGY_POSITION_PARAMETER.to_string(),
-                value: strategy_components.position_manager_id.clone(),
-            },
-            ManifestParameter {
-                name: STRATEGY_EXECUTION_PARAMETER.to_string(),
-                value: strategy_components.execution_model_id.clone(),
-            },
-        ]);
+    if let Some(strategy_components) = &input.strategy_components {
+        parameters.extend(strategy_components.manifest_parameters());
     }
 
     Ok(RunManifest {
         schema_version: SCHEMA_VERSION,
-        engine_version: options.engine_version.clone(),
-        data_snapshot_id: options
+        engine_version: input.engine_version.clone(),
+        data_snapshot_id: input
             .snapshot_id
             .clone()
-            .unwrap_or_else(|| default_snapshot_id(&options.request_path)),
-        provider_identity: options.provider_identity.as_str().to_string(),
-        symbol_or_universe: request.symbol.clone(),
+            .unwrap_or_else(|| default_snapshot_id(&input.default_snapshot_source)),
+        provider_identity: input.provider_identity.as_str().to_string(),
+        symbol_or_universe: input.request.symbol.clone(),
         universe_mode: "single_symbol".to_string(),
         historical_limitations: Vec::new(),
         date_range: DateRange {
@@ -2087,12 +2241,12 @@ fn build_manifest(request: &RunRequest, options: &RunOptions) -> Result<RunManif
         },
         reference_flow: ReferenceFlowDefinition {
             kind: "m1_reference_flow".to_string(),
-            entry_shares: request.reference_flow.entry_shares,
-            protective_stop_fraction: request.reference_flow.protective_stop_fraction,
+            entry_shares: input.request.reference_flow.entry_shares,
+            protective_stop_fraction: input.request.reference_flow.protective_stop_fraction,
         },
         parameters,
-        cost_model: request.reference_flow.cost_model.clone(),
-        gap_policy: request.gap_policy,
+        cost_model: input.request.reference_flow.cost_model.clone(),
+        gap_policy: input.request.gap_policy,
         seed: None,
         warnings: Vec::new(),
     })
@@ -2774,15 +2928,21 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use trendlab_artifact::{
-        LeaderboardView, ResearchReport, load_replay_bundle, load_research_report_bundle,
-        write_replay_bundle,
+        LeaderboardView, ResearchReport, RunManifest, load_replay_bundle,
+        load_research_report_bundle, write_replay_bundle, write_research_report_bundle,
     };
     use trendlab_core::accounting::CostModel;
     use trendlab_core::engine::{ReferenceFlowSpec, RunRequest};
     use trendlab_core::market::DailyBar;
     use trendlab_core::orders::{EntryIntent, GapPolicy, OrderIntent};
+    use trendlab_data::provider::ProviderIdentity;
 
-    use crate::{CliResponse, dispatch};
+    use crate::{
+        CliResponse, DEFAULT_ENGINE_VERSION, OperatorRunManifestSpec, OperatorRunSpec,
+        RUN_REQUEST_SOURCE_PARAMETER, RUN_SPEC_SOURCE_PARAMETER, STRATEGY_EXECUTION_PARAMETER,
+        STRATEGY_FILTER_PARAMETER, STRATEGY_POSITION_PARAMETER, STRATEGY_SIGNAL_PARAMETER,
+        StrategyComponentLabels, dispatch,
+    };
 
     #[test]
     fn run_command_writes_bundle_and_explain_surfaces_audit_rows() {
@@ -2835,6 +2995,152 @@ mod tests {
         );
 
         remove_dir_all_if_exists(request_path.parent().unwrap());
+        remove_dir_all_if_exists(&bundle_dir);
+    }
+
+    #[test]
+    fn run_command_accepts_inline_spec_and_preserves_manifest_provenance() {
+        let spec_path = test_output_dir("cli-inline-spec").join("run-spec.json");
+        let bundle_dir = test_output_dir("cli-inline-spec-bundle");
+        write_run_spec(
+            &spec_path,
+            &OperatorRunSpec {
+                request_path: None,
+                request: Some(sample_request()),
+                manifest: OperatorRunManifestSpec {
+                    provider_identity: Some(ProviderIdentity::Fixture),
+                    snapshot_id: Some("snapshot:inline".to_string()),
+                    engine_version: Some("m3-inline-spec".to_string()),
+                    strategy_components: Some(StrategyComponentLabels {
+                        signal_id: "breakout-close".to_string(),
+                        filter_id: "pass-through".to_string(),
+                        position_manager_id: "keep-position".to_string(),
+                        execution_model_id: "next-open".to_string(),
+                    }),
+                },
+            },
+        );
+
+        let response = dispatch([
+            "run",
+            "--spec",
+            spec_path.to_str().unwrap(),
+            "--output",
+            bundle_dir.to_str().unwrap(),
+        ]);
+
+        assert_eq!(response.exit_code, 0, "{}", response.stderr);
+
+        let bundle = load_replay_bundle(&bundle_dir).unwrap();
+        assert_eq!(bundle.manifest.engine_version, "m3-inline-spec");
+        assert_eq!(bundle.manifest.data_snapshot_id, "snapshot:inline");
+        assert_eq!(bundle.manifest.provider_identity, "fixture");
+        assert_eq!(
+            manifest_parameter_value(&bundle.manifest, RUN_REQUEST_SOURCE_PARAMETER),
+            "inline"
+        );
+        assert_eq!(
+            manifest_parameter_value(&bundle.manifest, RUN_SPEC_SOURCE_PARAMETER),
+            "run-spec.json"
+        );
+        assert_eq!(
+            manifest_parameter_value(&bundle.manifest, STRATEGY_SIGNAL_PARAMETER),
+            "breakout-close"
+        );
+        assert_eq!(
+            manifest_parameter_value(&bundle.manifest, STRATEGY_FILTER_PARAMETER),
+            "pass-through"
+        );
+        assert_eq!(
+            manifest_parameter_value(&bundle.manifest, STRATEGY_POSITION_PARAMETER),
+            "keep-position"
+        );
+        assert_eq!(
+            manifest_parameter_value(&bundle.manifest, STRATEGY_EXECUTION_PARAMETER),
+            "next-open"
+        );
+
+        remove_dir_all_if_exists(spec_path.parent().unwrap());
+        remove_dir_all_if_exists(&bundle_dir);
+    }
+
+    #[test]
+    fn run_command_accepts_spec_with_relative_request_path() {
+        let spec_dir = test_output_dir("cli-relative-spec");
+        let request_path = spec_dir.join("inputs").join("request.json");
+        let spec_path = spec_dir.join("run-spec.json");
+        let bundle_dir = test_output_dir("cli-relative-spec-bundle");
+        write_request(&request_path, &sample_request());
+        write_run_spec(
+            &spec_path,
+            &OperatorRunSpec {
+                request_path: Some("inputs/request.json".to_string()),
+                request: None,
+                manifest: OperatorRunManifestSpec {
+                    provider_identity: Some(ProviderIdentity::Fixture),
+                    snapshot_id: None,
+                    engine_version: None,
+                    strategy_components: None,
+                },
+            },
+        );
+
+        let response = dispatch([
+            "run",
+            "--spec",
+            spec_path.to_str().unwrap(),
+            "--output",
+            bundle_dir.to_str().unwrap(),
+        ]);
+
+        assert_eq!(response.exit_code, 0, "{}", response.stderr);
+
+        let bundle = load_replay_bundle(&bundle_dir).unwrap();
+        assert_eq!(bundle.manifest.engine_version, DEFAULT_ENGINE_VERSION);
+        assert_eq!(bundle.manifest.data_snapshot_id, "adhoc:request");
+        assert_eq!(
+            manifest_parameter_value(&bundle.manifest, RUN_REQUEST_SOURCE_PARAMETER),
+            "inputs/request.json"
+        );
+        assert_eq!(
+            manifest_parameter_value(&bundle.manifest, RUN_SPEC_SOURCE_PARAMETER),
+            "run-spec.json"
+        );
+
+        remove_dir_all_if_exists(&spec_dir);
+        remove_dir_all_if_exists(&bundle_dir);
+    }
+
+    #[test]
+    fn run_command_rejects_spec_with_cli_manifest_overrides() {
+        let spec_path = test_output_dir("cli-spec-overrides").join("run-spec.json");
+        let bundle_dir = test_output_dir("cli-spec-overrides-bundle");
+        write_run_spec(
+            &spec_path,
+            &OperatorRunSpec {
+                request_path: None,
+                request: Some(sample_request()),
+                manifest: OperatorRunManifestSpec::default(),
+            },
+        );
+
+        let response = dispatch([
+            "run",
+            "--spec",
+            spec_path.to_str().unwrap(),
+            "--output",
+            bundle_dir.to_str().unwrap(),
+            "--provider",
+            "fixture",
+        ]);
+
+        assert_eq!(response.exit_code, 1);
+        assert_eq!(
+            response.stderr,
+            "run --spec cannot be combined with --provider, --snapshot-id, --engine-version, or strategy-component flags"
+        );
+
+        remove_dir_all_if_exists(spec_path.parent().unwrap());
         remove_dir_all_if_exists(&bundle_dir);
     }
 
@@ -3149,7 +3455,7 @@ mod tests {
         assert!(
             explain_response
                 .stderr
-                .contains("research aggregate member `ALPHA`")
+                .contains("research report requires replay bundle")
         );
         assert!(
             explain_response
@@ -4033,6 +4339,7 @@ mod tests {
         ]);
 
         assert_eq!(response.exit_code, 0, "{}", response.stderr);
+        let stored_report = load_research_report_bundle(&report_dir).unwrap();
 
         let mut tampered = load_replay_bundle(&alpha_stop_bundle).unwrap();
         tampered
@@ -4046,6 +4353,9 @@ mod tests {
             &tampered.ledger,
         )
         .unwrap();
+        let report = load_research_report_bundle(&report_dir).unwrap_err();
+        assert!(report.to_string().contains("linked replay bundle"));
+        write_research_report_bundle(&report_dir, &stored_report).unwrap();
 
         let explain_response = dispatch(["research", "explain", report_dir.to_str().unwrap()]);
 
@@ -4479,6 +4789,24 @@ mod tests {
         )
         .unwrap();
         fs::write(path, serde_json::to_vec_pretty(request).unwrap()).unwrap();
+    }
+
+    fn write_run_spec(path: &Path, spec: &OperatorRunSpec) {
+        fs::create_dir_all(
+            path.parent()
+                .expect("run-spec.json should have a parent directory"),
+        )
+        .unwrap();
+        fs::write(path, serde_json::to_vec_pretty(spec).unwrap()).unwrap();
+    }
+
+    fn manifest_parameter_value<'a>(manifest: &'a RunManifest, name: &str) -> &'a str {
+        manifest
+            .parameters
+            .iter()
+            .find(|parameter| parameter.name == name)
+            .map(|parameter| parameter.value.as_str())
+            .unwrap_or_else(|| panic!("missing manifest parameter `{name}`"))
     }
 
     #[derive(Clone, Copy)]

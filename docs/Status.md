@@ -2,7 +2,7 @@
 
 ## Current State
 
-Week 23 provenance and compatibility hardening is complete. The current M6 stack now includes shared reopenable aggregate, walk-forward, bootstrap, and separated leaderboard research reports plus a CLI `research explain` path that revalidates linked replay bundles, rejects malformed or under-attributed reopen inputs explicitly, and keeps point-in-time universes deferred as not yet honest enough to schedule. The next active step is Week 24 final M6 checkpoint and roadmap reset.
+Week 30 first persisted live-snapshot write path is complete. The repo now has a truthful persisted market-data snapshot path in `trendlab-data`: `snapshot.json` records snapshot identity, provider identity, requested window, capture metadata, compatibility metadata, and per-symbol counts, while `daily/*.jsonl` and `actions/*.jsonl` persist stored raw bars and corporate actions that reopen offline and recompute normalization and resampling on demand. `cargo xtask capture-live-snapshot --provider tiingo --output <dir>` is now the first optional live-capture entrypoint outside normal validation. Point-in-time universes remain deferred because the repo still lacks an honest universe snapshot representation and historical-membership model. The next active step is Week 31 stored-snapshot inspect and audit flow.
 
 ## Locked Decisions
 
@@ -187,15 +187,51 @@ Week 23 provenance and compatibility hardening is complete. The current M6 stack
 - updated `docs/Artifacts.md` and `docs/Plan.md` so the repo contract now reflects Week 23 provenance-safe reopen behavior and the Week 24 checkpoint handoff
 - completed Week 23 and moved the active next step to Week 24 final M6 checkpoint and roadmap reset
 - re-verified `cargo xtask validate` after the Week 23 provenance and compatibility hardening changes
+- completed Week 24 and closed the M6 gate without forcing point-in-time universes into the roadmap before the prerequisite data model exists
+- explicitly deferred point-in-time universe work beyond the current roadmap until an honest universe snapshot representation and historical-membership model exist
+- added the first post-M6 planning horizon in `docs/Plan.md` and `docs/Roadmap.md` around operator-facing run specs, artifact portability and integrity, strategy-oracle hardening, and an honest real-fetch `validate-live` lane
+- re-verified `cargo xtask validate` after the Week 24 checkpoint and roadmap-reset updates
+- added `trendlab-cli run --spec <path>` as the first operator-facing run-spec path on top of the existing core `RunRequest` boundary
+- supported both inline request specs and spec-relative `request_path` specs so operator input can stay self-contained or reference low-level requests explicitly
+- kept strategy-component attribution in standardized shared-manifest parameters instead of introducing first-class manifest fields in this pass
+- added deterministic CLI coverage for inline spec runs, relative request-path spec runs, and spec-mode rejection of conflicting CLI manifest overrides
+- re-verified `cargo xtask validate` after the Week 25 operator-facing run-spec changes
+- added semantic manifest, summary, and ledger integrity fingerprints to replay-bundle descriptors and verify them on reopen when present
+- normalized shared research-report bundle links relative to the report directory when possible, with absolute fallback when relative normalization is not portable
+- moved missing-linked-bundle and linked-bundle-drift rejection into `trendlab-artifact` so shared research-report reopen paths fail before CLI-local provenance checks
+- added artifact and CLI regression coverage for replay integrity drift, moved report trees, missing linked bundles, and stale linked-bundle content
+- completed Week 26 and moved the active next step to Week 27 strategy fixture and oracle hardening
+- re-verified `cargo xtask validate` after the Week 26 portability and integrity changes
+- added a narrow strategy replay runner in `trendlab-core` that replays composite strategy decisions into shared ledger rows without introducing a second artifact boundary
+- added deterministic disk-backed strategy fixtures for close-confirmed next-open entry, blocked filter rejection, and carried stop-entry duplicate blocking under `fixtures/`
+- added the first hand-authored strategy oracle for the carried stop-entry duplicate-block case, including replay-bundle round-trip coverage through `trendlab-testkit`
+- verified that strategy fixture bundles carry standardized `strategy.signal_id`, `strategy.filter_id`, `strategy.position_manager_id`, and `strategy.execution_model_id` manifest parameters
+- completed Week 27 and moved the active next step to Week 28 live-provider smoke hardening
+- re-verified `cargo xtask validate` after the Week 27 strategy fixture and oracle changes
+- added a real Tiingo historical-prices fetch path in `trendlab-data` that converts provider rows into stored symbol history before normalization
+- extended `cargo xtask validate-live --provider tiingo` so the optional smoke lane now fetches, ingests, normalizes, and resamples real provider data instead of stopping at env validation
+- added deterministic live-fetch parsing and conversion tests plus re-verified the no-token failure path for `cargo xtask validate-live --provider tiingo`
+- completed Week 28, closed the M7 gate, and moved the active next step to the Week 29 post-M7 snapshot-capture checkpoint
+- re-verified `cargo xtask validate` after the Week 28 live-provider smoke changes
+- froze the Week 29 snapshot-capture contract around `trendlab-data` ownership instead of `trendlab-artifact` ownership
+- chose an inspectable `snapshot.json` plus `daily/*.jsonl` and `actions/*.jsonl` layout for the first persisted live-snapshot slice, with normalization and resampling recomputed on reopen
+- chose `xtask` as the first narrow live-snapshot capture entrypoint while later CLI and TUI snapshot flows remain consumers of shared/data-layer helpers
+- completed Week 29 and moved the active next step to Week 30 first persisted live-snapshot write path
+- re-verified `cargo xtask validate` after the Week 29 checkpoint doc updates
+- added persisted snapshot bundle descriptor types plus `snapshot.json` / `daily/*.jsonl` / `actions/*.jsonl` write-load helpers in `trendlab-data`
+- added deterministic snapshot round-trip and malformed-layout rejection coverage for the first offline reopen path
+- added `cargo xtask capture-live-snapshot --provider tiingo --output <dir>` so the live Tiingo path can fetch, persist, reopen, normalize, and resample one stored snapshot outside `cargo xtask validate`
+- completed Week 30 and moved the active next step to Week 31 stored-snapshot inspect and audit flow
+- re-verified `cargo xtask validate` after the Week 30 snapshot write/load changes
 
 ## Week 0 Closure Decisions
 
 - artifact bundle encoding:
   - directory bundle with `bundle.json`, `manifest.json`, `summary.json`, and `ledger.jsonl`
   - JSON for bundle, manifest, and summary; JSON Lines for the ledger
-- normalized market-data cache:
-  - `snapshot.json` plus per-symbol Parquet under `daily/` and `actions/`
-  - derived analysis series are computed from cached canonical daily data in the first M2 pass
+- normalized market-data snapshot path:
+  - `snapshot.json` plus per-symbol JSON Lines under `daily/` and `actions/`
+  - the first persisted slice stores stored raw bars and corporate actions, while normalization and resampling remain derived on reopen
 - M1 crate set:
   - `xtask`
   - `trendlab-core`
@@ -261,13 +297,30 @@ Week 23 provenance and compatibility hardening is complete. The current M6 stack
 - complete: `trendlab-tui` reopens shared run artifacts without parallel parsing rules
 - complete: audit views preserve run provenance and warnings while moving across panes
 
+## M6 Gate Checklist
+
+- complete: cross-symbol aggregation, walk-forward validation, bootstrap confidence, and separated leaderboards operate on top of the stable deterministic core
+- complete: shared `research.json` report ownership plus `research explain` preserve drill-down from research summaries back to replay-bundle truth
+- complete: malformed, stale, or under-attributed research inputs now reject explicitly instead of reopening or ranking dishonestly
+- complete: M6 closes honestly without point-in-time universes because the milestone only schedules them when the prerequisite universe snapshot and historical-membership model are stable enough
+
+## M7 Gate Checklist
+
+- complete: operator-facing run specs map cleanly onto shared and core request types without creating CLI-owned truth
+- complete: replay and research artifacts fail explicitly on broken links or integrity drift
+- complete: strategy-layer behavior is covered by deterministic fixture or oracle scenarios in addition to unit-only coverage
+- complete: `cargo xtask validate-live --provider tiingo` exercises a real provider fetch path while remaining outside `cargo xtask validate`
+- complete: point-in-time universes remain deferred until the universe snapshot and historical-membership model are honest enough to support them
+
 ## Next Planned Step
 
-Begin Week 24 final M6 checkpoint and roadmap reset:
+Begin Week 31 stored-snapshot inspect and audit flow:
 
-1. decide whether the current M6 gate is satisfied without point-in-time universes
-2. record whether point-in-time universe support remains deferred into a later milestone or becomes the next planning horizon
-3. update the backlog and define the next roadmap era from the actual post-Week-23 state
+1. add an audit-first reopen and inspect path for persisted snapshots on top of the Week 30 `snapshot.json` plus `daily/*.jsonl` and `actions/*.jsonl` layout
+2. surface provider identity, requested window, raw-bar counts, corporate-action counts, and normalization-sensitive fields explicitly for offline inspection
+3. keep snapshot reopen and audit behavior shared/data-layer-owned rather than CLI-local reconstruction
+4. keep normalization and resampling derived on reopen instead of persisting a second trusted normalized store
+5. keep point-in-time universes deferred until the snapshot and historical-membership prerequisites materially change
 
 ## Setup Verification
 
@@ -278,22 +331,25 @@ Begin Week 24 final M6 checkpoint and roadmap reset:
 - `.cursor/hooks.json` is repo-local and uses Windows PowerShell hook scripts under `.cursor/hooks/`.
 - `beforeShellExecution` denied a synthetic `git reset --hard` payload and allowed a synthetic `git status` payload in stdin-fed tests.
 - `afterFileEdit` emitted the expected advisory reminder for `AGENTS.md`, and `stop` emitted the expected `docs/Status.md` reminder when fed matching session state.
-- `cargo xtask validate-live --provider tiingo` now prints the Tiingo smoke plan, requires `TIINGO_API_TOKEN`, and fails cleanly without affecting normal validation.
+- `cargo xtask validate-live --provider tiingo` now prints the Tiingo smoke plan, fails cleanly without `TIINGO_API_TOKEN`, and when configured exercises a real fetch plus ingest/normalize/resample pipeline without affecting normal validation.
 
 ## Open Risks
 
-- the Parquet mapping layer for normalized daily bars and corporate actions may need careful schema choices once `trendlab-data` exists
-- the bundle descriptor may need checksums or file hashes later if replay-bundle integrity becomes a practical problem
+- the first live-snapshot slice now favors inspectable JSON and JSONL over a columnar format; if capture volume grows materially, later storage-efficiency work may still justify a more compact encoding
+- the current replay and research integrity fingerprints are aimed at accidental drift and stale-content detection; later real-world trust needs may still justify stronger cryptographic digests or signatures
+- the new strategy replay runner is intentionally narrow and currently centered on entry-oriented strategy flows; later exit-oriented execution or richer position-management scenarios may still justify another pass
 - the current warning storage is sufficient for the fixture-driven kernel and M2 data layer, but M3 filters and blocked-trade explanations may introduce new warning categories
 - higher-timeframe bars currently carry raw OHLC plus period-end `analysis_close`; if later strategy work needs weekly or monthly analysis open/high/low semantics, that contract still needs to be made explicit
 - the fixture scenarios are intentionally small; later provider and action edge cases may still want one more data-layer fixture beyond the current split/dividend and resampling cases
-- `cargo xtask validate-live` now validates the smoke shape and env prerequisite honestly, but it does not yet execute a real Tiingo HTTP fetch path
+- the real `cargo xtask validate-live` path now depends on Tiingo endpoint health, token validity, and external response shape, so smoke failures may reflect provider-side variability instead of local regressions
+- the repo now has a persisted snapshot-capture and reopen flow for provider-fetched data, but it does not yet expose an offline inspect or audit command for stored snapshots
 - the new strategy interfaces are intentionally narrow; if CLI or later audit surfaces need richer signal metadata or exit directives, that contract may still need one more pass
 - strategy composition is now covered by deterministic unit tests, but there is not yet a dedicated fixture/oracle harness for strategy-layer scenarios
-- the first CLI run path intentionally uses serialized core `RunRequest` inputs; a higher-level operator-facing run spec may still be needed before the CLI feels complete
+- the new operator-facing run spec still sits on top of inline or referenced low-level requests; later live-provider work may still want a richer operator-facing source model
 - replay-bundle data audit currently inspects persisted per-bar raw and analysis fields; if later TUI audit panels need explicit corporate-action markers inside replay artifacts, that artifact surface may need one more pass
 - the current inspect navigator derives per-trade items from the single-position replay ledger; if later M6 work introduces multi-symbol or richer trade grouping needs, that presentation model may need one more pass
-- shared research-report bundle links currently preserve the explicit replay-bundle paths supplied to the CLI; if later surfaces need stronger portability or path-normalization rules, that contract may need one more pass
-- point-in-time universes are now explicitly deferred; the repo still lacks an honest universe snapshot representation and historical membership path for research runs
-- strategy-component attribution currently rides in standardized manifest parameters; Week 23 proves that is sufficient for current reopen and ranking checks, but older-bundle compatibility or richer later audit surfaces may still justify first-class manifest fields
+- legacy replay bundles or research reports written before the Week 26 integrity metadata still reopen through compatibility paths, but they do not get the same drift checks until they are rewritten
+- the first strategy fixture harness now exists, but later strategy families may still expose a need for richer row-level reason codes or pending-order provenance than the current ledger shape carries
+- point-in-time universes are now explicitly deferred beyond the current roadmap; the repo still lacks an honest universe snapshot representation and historical-membership path for research runs
+- strategy-component attribution still rides in standardized manifest parameters; Week 25 keeps that shared-manifest path in place, but older-bundle compatibility or richer later audit surfaces may still justify first-class manifest fields
 - repo-local `.codex/config.toml` is in place, but this Codex CLI build did not surface the repo-local MCP servers via `codex mcp list`; Cursor/IDE trusted-project behavior still needs manual confirmation

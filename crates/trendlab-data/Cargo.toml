@@ -6,5 +6,7 @@ rust-version = "1.91"
 publish = false
 
 [dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.147"
 trendlab-core = { path = "../trendlab-core" }

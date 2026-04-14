@@ -49,7 +49,7 @@ Owns:
 - provider-specific raw types
 - provider trait implementations
 - Tiingo adapter
-- raw cache
+- persisted market-data snapshots and their schema/versioning
 - corporate actions ingestion
 - normalization into `trendlab-core` market types
 - resampling
@@ -134,35 +134,46 @@ Use this dependency direction and keep it one-way:
 
 Live provider checks should live behind a separate command such as `cargo xtask validate-live` and must not be required for normal milestone completion.
 
-## Week 0 Data Cache Decision
+## Week 29 Snapshot Capture Decision
 
-The initial normalized market-data cache format is a snapshot directory with a UTF-8 JSON manifest and per-symbol Parquet files.
+The first persisted live-snapshot slice is owned by `trendlab-data`, not by `trendlab-artifact`.
+
+The first truthful on-disk snapshot format is a snapshot directory with a UTF-8 JSON manifest and per-symbol JSON Lines files.
 
 Canonical layout:
 
 ```text
 cache/
-  normalized/
+  snapshots/
     <snapshot-id>/
       snapshot.json
       daily/
-        <SYMBOL>.parquet
+        <SYMBOL>.jsonl
       actions/
-        <SYMBOL>.parquet
+        <SYMBOL>.jsonl
 ```
 
 Rules:
 
-- `snapshot.json` stores provider identity, schema version, snapshot identifier, and generation metadata.
-- `daily/<SYMBOL>.parquet` stores canonical normalized daily bars for that snapshot.
-- `actions/<SYMBOL>.parquet` stores splits and dividend cashflows for that snapshot.
-- Derived analysis series are computed from cached canonical daily data in the first M2 pass rather than persisted as a separate cache.
+- `snapshot.json` stores schema version, snapshot identifier, provider identity, symbol list, requested date window, capture metadata, and compatibility metadata for the snapshot bundle.
+- `daily/<SYMBOL>.jsonl` stores the persisted stored raw daily bars for that symbol.
+- `actions/<SYMBOL>.jsonl` stores the persisted stored corporate actions for that symbol.
+- the first Week 30 capture path may only write one symbol, but the layout stays per-symbol so later curated multi-symbol capture does not need a second on-disk shape.
+- normalization into canonical `trendlab-core` daily bars, split effects, and resampled higher-timeframe bars remains derived on reopen rather than persisted as a second trusted store.
+- provider-native HTTP payloads are not the canonical persisted snapshot format.
 
 Rationale:
 
-- Parquet is a better fit than JSON or CSV for medium-scale historical bar storage.
-- The JSON snapshot manifest keeps provenance and snapshot identity inspectable.
-- Keeping analysis series derived reduces early cache complexity and lowers the risk of multiple partially trusted price-space stores.
+- UTF-8 JSON plus JSONL keeps the first snapshot path directly inspectable during the trust-hardening phase.
+- Persisting stored raw bars and corporate actions matches the existing `trendlab-data` ownership boundary and avoids inventing a second partially trusted normalized cache too early.
+- Keeping normalization derived on reopen reduces early cache complexity and lowers the risk of multiple partially trusted price-space stores.
+- Columnar or compressed snapshot encodings can be revisited later if the truthful reopen path proves stable and data volume makes them necessary.
+
+## Week 29 Operator Boundary Decision
+
+- the first live-snapshot capture entrypoint should live in `xtask` as an optional operator/developer task while the capture path is still narrow and explicitly outside normal validation
+- snapshot reopen, load, and audit helpers should live in `trendlab-data`
+- later CLI or TUI snapshot workflows should consume those shared/data-layer helpers instead of owning snapshot parsing rules
 
 ## Early Implementation Sequence
 

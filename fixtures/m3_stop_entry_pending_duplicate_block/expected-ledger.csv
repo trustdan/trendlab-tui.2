@@ -1,0 +1,5 @@
+date,raw_open,raw_high,raw_low,raw_close,analysis_close,position_shares,signal_output,filter_outcome,pending_order_state,fill_price,prior_stop,next_stop,cash,equity,reason_codes
+2025-01-02,100.0,101.0,99.0,100.5,100.5,0,none,not_checked,none,,,,1000.0,1000.0,
+2025-01-03,101.0,103.0,100.0,101.0,101.0,0,none,not_checked,none,,,,1000.0,1000.0,
+2025-01-06,101.0,103.5,100.5,102.0,102.0,0,stop_entry_breakout,pass,carry_stop_entry:1@103.5,,,,1000.0,1000.0,stop_entry_order_carried
+2025-01-07,102.5,103.4,102.0,103.0,103.0,0,stop_entry_breakout,pass,carry_stop_entry:1@103.5,,,,1000.0,1000.0,pending_order_carried|pending_order_already_active|pending_order_at_end

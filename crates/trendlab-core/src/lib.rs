@@ -533,6 +533,10 @@ pub mod engine {
     use crate::ledger::LedgerRow;
     use crate::market::DailyBar;
     use crate::orders::{EntryIntent, GapPolicy, OrderIntent, PendingOrder};
+    use crate::strategy::{
+        CompositeStrategy, ExecutionDecision, FilterDecision, PositionDecision, SignalDecision,
+        SignalFilter, SignalGenerator, StrategyContext,
+    };
 
     #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
     pub struct ReferenceFlowSpec {
@@ -547,6 +551,14 @@ pub mod engine {
         pub symbol: String,
         pub bars: Vec<DailyBar>,
         pub entry_intents: Vec<EntryIntent>,
+        pub reference_flow: ReferenceFlowSpec,
+        pub gap_policy: GapPolicy,
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct StrategyRunRequest {
+        pub symbol: String,
+        pub bars: Vec<DailyBar>,
         pub reference_flow: ReferenceFlowSpec,
         pub gap_policy: GapPolicy,
     }
@@ -741,6 +753,243 @@ pub mod engine {
         })
     }
 
+    pub fn run_strategy_flow<S, F, P, E>(
+        request: &StrategyRunRequest,
+        strategy: &CompositeStrategy<S, F, P, E>,
+    ) -> Result<RunResult, SimulationError>
+    where
+        S: SignalGenerator,
+        F: SignalFilter,
+        P: crate::strategy::PositionManager,
+        E: crate::strategy::ExecutionModel,
+    {
+        validate_strategy_request(request)?;
+
+        let mut ledger = Vec::with_capacity(request.bars.len());
+        let mut cash = request.reference_flow.initial_cash;
+        let mut position = PositionState::default();
+        let mut pending_order: Option<PendingOrder> = None;
+
+        for (index, bar) in request.bars.iter().enumerate() {
+            let is_last_bar = index + 1 == request.bars.len();
+            let mut reason_codes = Vec::new();
+            let mut filter_outcome = "not_checked".to_string();
+            let mut fill_price = None;
+            let prior_stop = position.active_stop;
+            let mut next_pending_order = pending_order.take();
+
+            if let Some(order) = next_pending_order.take() {
+                if position.shares != 0 {
+                    return Err(SimulationError::invalid_request(
+                        "pending strategy entry order cannot fill while a position is already open",
+                    ));
+                }
+
+                match order.intent {
+                    OrderIntent::QueueMarketEntry => {
+                        let execution_price =
+                            apply_buy_costs(bar.raw_open, &request.reference_flow.cost_model);
+                        let total_cash_out = total_buy_cash_out(
+                            execution_price,
+                            order.shares,
+                            &request.reference_flow.cost_model,
+                        );
+
+                        if total_cash_out > cash {
+                            return Err(SimulationError::invalid_request(
+                                "queued market entry requires more cash than is available",
+                            ));
+                        }
+
+                        cash -= total_cash_out;
+                        position.shares = order.shares;
+                        position.entry_price = Some(execution_price);
+                        fill_price = Some(execution_price);
+                        reason_codes.push("entry_filled_at_open".to_string());
+                    }
+                    OrderIntent::CarryStopEntry => {
+                        let stop_price = order.stop_price.ok_or_else(|| {
+                            SimulationError::invalid_request(
+                                "carried stop-entry orders require a stop_price",
+                            )
+                        })?;
+
+                        if let Some((execution_price, reason_code)) = resolve_stop_entry_fill(
+                            request.gap_policy,
+                            stop_price,
+                            bar,
+                            &request.reference_flow.cost_model,
+                        ) {
+                            let total_cash_out = total_buy_cash_out(
+                                execution_price,
+                                order.shares,
+                                &request.reference_flow.cost_model,
+                            );
+
+                            if total_cash_out > cash {
+                                return Err(SimulationError::invalid_request(
+                                    "stop-entry order requires more cash than is available",
+                                ));
+                            }
+
+                            cash -= total_cash_out;
+                            position.shares = order.shares;
+                            position.entry_price = Some(execution_price);
+                            fill_price = Some(execution_price);
+                            reason_codes.push(reason_code.to_string());
+                        } else {
+                            reason_codes.push("pending_order_carried".to_string());
+                            next_pending_order = Some(order);
+                        }
+                    }
+                }
+            }
+
+            if let Some(active_stop) = prior_stop {
+                if position.shares == 0 {
+                    return Err(SimulationError::invalid_request(
+                        "active stop requires an open position",
+                    ));
+                }
+
+                if let Some((execution_price, reason_code)) = resolve_stop_fill(
+                    request.gap_policy,
+                    active_stop,
+                    bar,
+                    &request.reference_flow.cost_model,
+                ) {
+                    cash += total_sell_cash_in(
+                        execution_price,
+                        position.shares,
+                        &request.reference_flow.cost_model,
+                    );
+                    position = PositionState::default();
+                    next_pending_order = None;
+                    fill_price = Some(execution_price);
+                    reason_codes.push(reason_code.to_string());
+                }
+            }
+
+            let evaluation = strategy.evaluate(&StrategyContext {
+                symbol: request.symbol.as_str(),
+                completed_bars: &request.bars[..index],
+                current_bar: bar,
+                position: &position,
+                pending_order: next_pending_order.as_ref(),
+            });
+
+            let signal_output = describe_signal_output(&evaluation.signal);
+            if !matches!(evaluation.signal, SignalDecision::None) {
+                filter_outcome = describe_filter_outcome(&evaluation.filter);
+            }
+
+            match evaluation.position {
+                PositionDecision::Keep => {}
+                PositionDecision::SetProtectiveStop {
+                    stop_price,
+                    reason_code,
+                } => {
+                    if position.shares == 0 {
+                        return Err(SimulationError::invalid_request(
+                            "protective stop decisions require an open position",
+                        ));
+                    }
+
+                    position.active_stop = Some(round_price(stop_price));
+                    reason_codes.push(reason_code);
+                }
+                PositionDecision::Exit { .. } => {
+                    return Err(SimulationError::not_implemented());
+                }
+            }
+
+            match evaluation.execution {
+                ExecutionDecision::None => {}
+                ExecutionDecision::QueueMarketEntry { shares, .. } => {
+                    next_pending_order = Some(PendingOrder {
+                        intent: OrderIntent::QueueMarketEntry,
+                        shares,
+                        stop_price: None,
+                    });
+                    reason_codes.push("entry_queued_from_strategy".to_string());
+                }
+                ExecutionDecision::CarryStopEntry {
+                    stop_price, shares, ..
+                } => {
+                    next_pending_order = Some(PendingOrder {
+                        intent: OrderIntent::CarryStopEntry,
+                        shares,
+                        stop_price: Some(round_price(stop_price)),
+                    });
+                    reason_codes.push("stop_entry_order_carried".to_string());
+                }
+                ExecutionDecision::QueueMarketExit { .. } => {
+                    return Err(SimulationError::not_implemented());
+                }
+                ExecutionDecision::Blocked { reason_code } => {
+                    reason_codes.push(reason_code);
+                }
+            }
+
+            if position.shares != 0 && reason_codes.is_empty() {
+                reason_codes.push("hold_position".to_string());
+            }
+
+            if is_last_bar && position.shares != 0 {
+                reason_codes.push("open_position_at_end".to_string());
+            }
+
+            if is_last_bar && next_pending_order.is_some() {
+                reason_codes.push("pending_order_at_end".to_string());
+            }
+
+            let pending_order_state = next_pending_order
+                .as_ref()
+                .map(PendingOrder::describe_state)
+                .unwrap_or_else(|| "none".to_string());
+            let equity = round_price(cash + mark_to_market(bar.raw_close, position.shares));
+
+            ledger.push(LedgerRow {
+                date: bar.date.clone(),
+                raw_open: bar.raw_open,
+                raw_high: bar.raw_high,
+                raw_low: bar.raw_low,
+                raw_close: bar.raw_close,
+                analysis_close: bar.analysis_close,
+                position_shares: position.shares,
+                signal_output,
+                filter_outcome,
+                pending_order_state,
+                fill_price,
+                prior_stop,
+                next_stop: position.active_stop,
+                cash: round_price(cash),
+                equity,
+                reason_codes,
+            });
+
+            pending_order = next_pending_order;
+        }
+
+        Ok(RunResult {
+            ledger,
+            cash: CashSummary {
+                cash: round_price(cash),
+                equity: round_price(
+                    cash + mark_to_market(
+                        request
+                            .bars
+                            .last()
+                            .expect("validated non-empty bar sequence")
+                            .raw_close,
+                        position.shares,
+                    ),
+                ),
+            },
+            position,
+        })
+    }
+
     fn validate_request(request: &RunRequest) -> Result<(), SimulationError> {
         if request.symbol.trim().is_empty() {
             return Err(SimulationError::invalid_request(
@@ -748,38 +997,58 @@ pub mod engine {
             ));
         }
 
-        if request.reference_flow.entry_shares == 0 {
-            return Err(SimulationError::invalid_request(
-                "reference flow entry_shares must be greater than zero",
-            ));
-        }
-
-        if request.reference_flow.protective_stop_fraction <= 0.0
-            || request.reference_flow.protective_stop_fraction >= 1.0
-        {
-            return Err(SimulationError::invalid_request(
-                "protective_stop_fraction must be greater than zero and less than one",
-            ));
-        }
-
-        if request.reference_flow.cost_model.commission_per_fill < 0.0 {
-            return Err(SimulationError::invalid_request(
-                "commission_per_fill must not be negative",
-            ));
-        }
-
-        if request.reference_flow.cost_model.slippage_per_share < 0.0 {
-            return Err(SimulationError::invalid_request(
-                "slippage_per_share must not be negative",
-            ));
-        }
-
+        validate_reference_flow_spec(&request.reference_flow)?;
         let bar_dates = validate_bars(&request.bars)?;
         validate_entry_intent_inputs(
             &request.entry_intents,
             &bar_dates,
             request.reference_flow.entry_shares,
         )?;
+
+        Ok(())
+    }
+
+    fn validate_strategy_request(request: &StrategyRunRequest) -> Result<(), SimulationError> {
+        if request.symbol.trim().is_empty() {
+            return Err(SimulationError::invalid_request(
+                "run requests must include a non-empty symbol",
+            ));
+        }
+
+        validate_reference_flow_spec(&request.reference_flow)?;
+        validate_bars(&request.bars)?;
+
+        Ok(())
+    }
+
+    fn validate_reference_flow_spec(
+        reference_flow: &ReferenceFlowSpec,
+    ) -> Result<(), SimulationError> {
+        if reference_flow.entry_shares == 0 {
+            return Err(SimulationError::invalid_request(
+                "reference flow entry_shares must be greater than zero",
+            ));
+        }
+
+        if reference_flow.protective_stop_fraction <= 0.0
+            || reference_flow.protective_stop_fraction >= 1.0
+        {
+            return Err(SimulationError::invalid_request(
+                "protective_stop_fraction must be greater than zero and less than one",
+            ));
+        }
+
+        if reference_flow.cost_model.commission_per_fill < 0.0 {
+            return Err(SimulationError::invalid_request(
+                "commission_per_fill must not be negative",
+            ));
+        }
+
+        if reference_flow.cost_model.slippage_per_share < 0.0 {
+            return Err(SimulationError::invalid_request(
+                "slippage_per_share must not be negative",
+            ));
+        }
 
         Ok(())
     }
@@ -942,6 +1211,46 @@ pub mod engine {
                     None
                 }
             }
+        }
+    }
+
+    fn resolve_stop_entry_fill(
+        gap_policy: GapPolicy,
+        entry_stop: f64,
+        bar: &DailyBar,
+        cost_model: &CostModel,
+    ) -> Option<(f64, &'static str)> {
+        match gap_policy {
+            GapPolicy::M1Default => {
+                if bar.raw_open >= entry_stop {
+                    Some((
+                        apply_buy_costs(bar.raw_open, cost_model),
+                        "stop_entry_triggered_gap_open",
+                    ))
+                } else if bar.raw_high >= entry_stop {
+                    Some((
+                        apply_buy_costs(entry_stop, cost_model),
+                        "stop_entry_triggered_intrabar",
+                    ))
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn describe_signal_output(signal: &SignalDecision) -> String {
+        match signal {
+            SignalDecision::None => "none".to_string(),
+            SignalDecision::EnterLong { signal_id, .. }
+            | SignalDecision::ExitLong { signal_id } => signal_id.clone(),
+        }
+    }
+
+    fn describe_filter_outcome(filter: &FilterDecision) -> String {
+        match filter {
+            FilterDecision::Pass => "pass".to_string(),
+            FilterDecision::Block { reason_code } => format!("block:{reason_code}"),
         }
     }
 

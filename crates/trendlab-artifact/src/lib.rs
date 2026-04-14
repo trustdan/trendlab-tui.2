@@ -27,12 +27,27 @@ pub struct BundleDescriptor {
     pub manifest_path: String,
     pub summary_path: String,
     pub ledger_path: String,
+    #[serde(default)]
+    pub integrity: Option<ReplayBundleIntegrity>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DateRange {
     pub start_date: String,
     pub end_date: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContentFingerprint {
+    pub byte_count: usize,
+    pub fnv1a64: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplayBundleIntegrity {
+    pub manifest: ContentFingerprint,
+    pub summary: ContentFingerprint,
+    pub ledger: ContentFingerprint,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -294,7 +309,15 @@ impl ResearchReport {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct StoredResearchReport {
     schema_version: u32,
+    #[serde(default)]
+    linked_replay_bundles: Vec<StoredResearchBundleLink>,
     report: ResearchReport,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct StoredResearchBundleLink {
+    path: PathBuf,
+    integrity: ReplayBundleIntegrity,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -355,6 +378,14 @@ impl BundleDescriptor {
             manifest_path: MANIFEST_FILE_NAME.to_string(),
             summary_path: SUMMARY_FILE_NAME.to_string(),
             ledger_path: LEDGER_FILE_NAME.to_string(),
+            integrity: None,
+        }
+    }
+
+    fn canonical_with_integrity(integrity: ReplayBundleIntegrity) -> Self {
+        Self {
+            integrity: Some(integrity),
+            ..Self::canonical()
         }
     }
 }
@@ -411,7 +442,9 @@ pub fn write_replay_bundle(
 ) -> Result<BundleDescriptor, ArtifactError> {
     validate_replay_bundle_parts(manifest, summary, ledger)?;
 
-    let descriptor = BundleDescriptor::canonical();
+    let descriptor = BundleDescriptor::canonical_with_integrity(compute_replay_bundle_integrity(
+        manifest, summary, ledger,
+    )?);
 
     fs::create_dir_all(bundle_dir)
         .map_err(|err| ArtifactError::io("failed to create", bundle_dir, &err))?;
@@ -466,6 +499,14 @@ pub fn load_replay_bundle(bundle_dir: &Path) -> Result<ReplayBundle, ArtifactErr
 
     let summary: RunSummary = read_json(&summary_path, "failed to read")?;
     let ledger: Vec<PersistedLedgerRow> = read_json_lines(&ledger_path, "failed to read")?;
+    if let Some(expected_integrity) = &descriptor.integrity {
+        let actual_integrity = compute_replay_bundle_integrity(&manifest, &summary, &ledger)?;
+        validate_replay_bundle_integrity(
+            expected_integrity,
+            &actual_integrity,
+            &bundle_dir.join(BUNDLE_FILE_NAME),
+        )?;
+    }
     validate_replay_bundle_parts(&manifest, &summary, &ledger)?;
 
     Ok(ReplayBundle {
@@ -482,13 +523,45 @@ pub fn write_research_report_bundle(
 ) -> Result<(), ArtifactError> {
     validate_research_report(report)?;
 
-    let stored = StoredResearchReport {
-        schema_version: SCHEMA_VERSION,
-        report: report.clone(),
-    };
-
     fs::create_dir_all(report_dir)
         .map_err(|err| ArtifactError::io("failed to create", report_dir, &err))?;
+    let normalized_report_dir = normalize_external_path(report_dir)?;
+    let normalized_report = map_research_report_bundle_paths(report, &mut |bundle_path| {
+        let normalized_bundle_path = normalize_external_path(bundle_path)?;
+        Ok(
+            relative_external_path(&normalized_report_dir, &normalized_bundle_path)
+                .unwrap_or(normalized_bundle_path),
+        )
+    })?;
+    let linked_replay_bundles = collect_research_report_bundle_paths(&normalized_report)
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|stored_path| {
+            let resolved_path = resolve_research_bundle_path(&normalized_report_dir, &stored_path);
+            let bundle = load_replay_bundle(&resolved_path).map_err(|err| {
+                ArtifactError::invalid(format!(
+                    "research report requires replay bundle {}: {err}",
+                    resolved_path.display()
+                ))
+            })?;
+            Ok(StoredResearchBundleLink {
+                path: stored_path,
+                integrity: compute_replay_bundle_integrity(
+                    &bundle.manifest,
+                    &bundle.summary,
+                    &bundle.ledger,
+                )?,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let stored = StoredResearchReport {
+        schema_version: SCHEMA_VERSION,
+        linked_replay_bundles,
+        report: normalized_report,
+    };
+
     write_json_pretty(
         &report_dir.join(RESEARCH_REPORT_FILE_NAME),
         &stored,
@@ -507,9 +580,42 @@ pub fn load_research_report_bundle(report_dir: &Path) -> Result<ResearchReport, 
         )));
     }
 
-    validate_research_report(&stored.report)?;
+    let normalized_report_dir = normalize_external_path(report_dir)?;
+    validate_research_report_bundle_links(&stored, &path)?;
+    let report = map_research_report_bundle_paths(&stored.report, &mut |bundle_path| {
+        let resolved_path = resolve_research_bundle_path(&normalized_report_dir, bundle_path);
+        if let Some(expected_integrity) = stored
+            .linked_replay_bundles
+            .iter()
+            .find(|link| link.path == bundle_path)
+            .map(|link| &link.integrity)
+        {
+            let bundle = load_replay_bundle(&resolved_path).map_err(|err| {
+                ArtifactError::invalid(format!(
+                    "research report requires replay bundle {}: {err}",
+                    resolved_path.display()
+                ))
+            })?;
+            let actual_integrity =
+                compute_replay_bundle_integrity(&bundle.manifest, &bundle.summary, &bundle.ledger)?;
+            validate_replay_bundle_integrity(
+                expected_integrity,
+                &actual_integrity,
+                &path,
+            )
+            .map_err(|_| {
+                ArtifactError::invalid(format!(
+                    "research report linked replay bundle {} no longer matches stored integrity metadata",
+                    resolved_path.display()
+                ))
+            })?;
+        }
+        Ok(resolved_path)
+    })?;
 
-    Ok(stored.report)
+    validate_research_report(&report)?;
+
+    Ok(report)
 }
 
 pub fn validate_research_report(report: &ResearchReport) -> Result<(), ArtifactError> {
@@ -1611,6 +1717,344 @@ fn resolve_bundle_path(
     Ok(bundle_dir.join(path))
 }
 
+fn validate_replay_bundle_integrity(
+    expected: &ReplayBundleIntegrity,
+    actual: &ReplayBundleIntegrity,
+    path: &Path,
+) -> Result<(), ArtifactError> {
+    if expected == actual {
+        return Ok(());
+    }
+
+    let field_name = if expected.manifest != actual.manifest {
+        "manifest"
+    } else if expected.summary != actual.summary {
+        "summary"
+    } else {
+        "ledger"
+    };
+
+    Err(ArtifactError::invalid(format!(
+        "replay bundle integrity mismatch for {} {field_name}",
+        path.display()
+    )))
+}
+
+fn compute_replay_bundle_integrity(
+    manifest: &RunManifest,
+    summary: &RunSummary,
+    ledger: &[PersistedLedgerRow],
+) -> Result<ReplayBundleIntegrity, ArtifactError> {
+    Ok(ReplayBundleIntegrity {
+        manifest: fingerprint_json_value(manifest, "manifest")?,
+        summary: fingerprint_json_value(summary, "summary")?,
+        ledger: fingerprint_json_value(ledger, "ledger")?,
+    })
+}
+
+fn fingerprint_json_value<T: Serialize + ?Sized>(
+    value: &T,
+    label: &str,
+) -> Result<ContentFingerprint, ArtifactError> {
+    let bytes = serde_json::to_vec(value).map_err(|err| {
+        ArtifactError::invalid(format!(
+            "failed to serialize replay bundle {label} for integrity fingerprinting: {err}"
+        ))
+    })?;
+    Ok(ContentFingerprint {
+        byte_count: bytes.len(),
+        fnv1a64: format!("{:016x}", fnv1a64(&bytes)),
+    })
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    const OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+
+    let mut hash = OFFSET_BASIS;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
+}
+
+fn validate_research_report_bundle_links(
+    stored: &StoredResearchReport,
+    report_path: &Path,
+) -> Result<(), ArtifactError> {
+    if stored.linked_replay_bundles.is_empty() {
+        validate_research_report(&stored.report)?;
+        return Ok(());
+    }
+
+    let expected_paths = collect_research_report_bundle_paths(&stored.report)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let actual_paths = stored
+        .linked_replay_bundles
+        .iter()
+        .map(|link| link.path.clone())
+        .collect::<BTreeSet<_>>();
+
+    if expected_paths != actual_paths {
+        return Err(ArtifactError::invalid(format!(
+            "research report linked replay bundle metadata in {} does not match stored report paths",
+            report_path.display()
+        )));
+    }
+
+    validate_research_report(&stored.report)
+}
+
+fn collect_research_report_bundle_paths(report: &ResearchReport) -> Vec<PathBuf> {
+    match report {
+        ResearchReport::Aggregate(report) => report
+            .members
+            .iter()
+            .map(|member| member.bundle_path.clone())
+            .collect(),
+        ResearchReport::WalkForward(report) => report
+            .splits
+            .iter()
+            .flat_map(|split| split.children.iter().map(|child| child.bundle_path.clone()))
+            .collect(),
+        ResearchReport::BootstrapAggregate(report) => report
+            .baseline
+            .members
+            .iter()
+            .map(|member| member.bundle_path.clone())
+            .collect(),
+        ResearchReport::BootstrapWalkForward(report) => report
+            .splits
+            .iter()
+            .flat_map(|split| split.children.iter().map(|child| child.bundle_path.clone()))
+            .collect(),
+        ResearchReport::Leaderboard(report) => report
+            .rows
+            .iter()
+            .flat_map(|row| {
+                row.aggregate
+                    .members
+                    .iter()
+                    .map(|member| member.bundle_path.clone())
+            })
+            .collect(),
+    }
+}
+
+fn map_research_report_bundle_paths(
+    report: &ResearchReport,
+    mapper: &mut dyn FnMut(&Path) -> Result<PathBuf, ArtifactError>,
+) -> Result<ResearchReport, ArtifactError> {
+    match report {
+        ResearchReport::Aggregate(report) => {
+            Ok(ResearchReport::Aggregate(ResearchAggregateReport {
+                members: report
+                    .members
+                    .iter()
+                    .map(|member| {
+                        Ok(ResearchAggregateMember {
+                            bundle_path: mapper(&member.bundle_path)?,
+                            ..member.clone()
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                ..report.clone()
+            }))
+        }
+        ResearchReport::WalkForward(report) => {
+            Ok(ResearchReport::WalkForward(ResearchWalkForwardReport {
+                splits: report
+                    .splits
+                    .iter()
+                    .map(|split| {
+                        Ok(ResearchWalkForwardSplit {
+                            children: split
+                                .children
+                                .iter()
+                                .map(|child| {
+                                    Ok(ResearchWalkForwardSplitChild {
+                                        bundle_path: mapper(&child.bundle_path)?,
+                                        ..child.clone()
+                                    })
+                                })
+                                .collect::<Result<Vec<_>, _>>()?,
+                            ..split.clone()
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                ..report.clone()
+            }))
+        }
+        ResearchReport::BootstrapAggregate(report) => {
+            let baseline = match map_research_report_bundle_paths(
+                &ResearchReport::Aggregate(report.baseline.clone()),
+                mapper,
+            )? {
+                ResearchReport::Aggregate(baseline) => baseline,
+                _ => unreachable!("aggregate remap must return aggregate"),
+            };
+            Ok(ResearchReport::BootstrapAggregate(
+                ResearchBootstrapAggregateReport {
+                    baseline,
+                    ..report.clone()
+                },
+            ))
+        }
+        ResearchReport::BootstrapWalkForward(report) => {
+            let baseline = match map_research_report_bundle_paths(
+                &ResearchReport::WalkForward(report.baseline.clone()),
+                mapper,
+            )? {
+                ResearchReport::WalkForward(baseline) => baseline,
+                _ => unreachable!("walk-forward remap must return walk-forward"),
+            };
+            Ok(ResearchReport::BootstrapWalkForward(
+                ResearchBootstrapWalkForwardReport {
+                    baseline,
+                    splits: report
+                        .splits
+                        .iter()
+                        .map(|split| {
+                            Ok(ResearchBootstrapWalkForwardSplit {
+                                children: split
+                                    .children
+                                    .iter()
+                                    .map(|child| {
+                                        Ok(ResearchWalkForwardSplitChild {
+                                            bundle_path: mapper(&child.bundle_path)?,
+                                            ..child.clone()
+                                        })
+                                    })
+                                    .collect::<Result<Vec<_>, _>>()?,
+                                ..split.clone()
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                    ..report.clone()
+                },
+            ))
+        }
+        ResearchReport::Leaderboard(report) => {
+            Ok(ResearchReport::Leaderboard(ResearchLeaderboardReport {
+                rows: report
+                    .rows
+                    .iter()
+                    .map(|row| {
+                        Ok(ResearchLeaderboardRow {
+                            aggregate: ResearchAggregateReport {
+                                members: row
+                                    .aggregate
+                                    .members
+                                    .iter()
+                                    .map(|member| {
+                                        Ok(ResearchAggregateMember {
+                                            bundle_path: mapper(&member.bundle_path)?,
+                                            ..member.clone()
+                                        })
+                                    })
+                                    .collect::<Result<Vec<_>, _>>()?,
+                                ..row.aggregate.clone()
+                            },
+                            ..row.clone()
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                ..report.clone()
+            }))
+        }
+    }
+}
+
+fn resolve_research_bundle_path(report_dir: &Path, stored_path: &Path) -> PathBuf {
+    if stored_path.is_absolute() {
+        normalize_path(stored_path)
+    } else {
+        normalize_path(&report_dir.join(stored_path))
+    }
+}
+
+fn normalize_external_path(path: &Path) -> Result<PathBuf, ArtifactError> {
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|err| {
+                ArtifactError::invalid(format!(
+                    "failed to read current directory while resolving {}: {err}",
+                    path.display()
+                ))
+            })?
+            .join(path)
+    };
+
+    Ok(normalize_path(&path))
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::Normal(part) => normalized.push(part),
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+        }
+    }
+
+    normalized
+}
+
+fn relative_external_path(from_dir: &Path, to_path: &Path) -> Option<PathBuf> {
+    let from_components = from_dir.components().collect::<Vec<_>>();
+    let to_components = to_path.components().collect::<Vec<_>>();
+
+    let mut shared = 0_usize;
+    while shared < from_components.len()
+        && shared < to_components.len()
+        && component_os_str(from_components[shared]) == component_os_str(to_components[shared])
+    {
+        shared += 1;
+    }
+
+    if shared == 0 {
+        return None;
+    }
+
+    let mut relative = PathBuf::new();
+    for component in &from_components[shared..] {
+        if matches!(component, Component::Normal(_)) {
+            relative.push("..");
+        }
+    }
+    for component in &to_components[shared..] {
+        relative.push(component_os_str(*component));
+    }
+
+    if relative.as_os_str().is_empty() {
+        relative.push(".");
+    }
+
+    Some(relative)
+}
+
+fn component_os_str(component: Component<'_>) -> &std::ffi::OsStr {
+    match component {
+        Component::Prefix(prefix) => prefix.as_os_str(),
+        Component::RootDir => std::ffi::OsStr::new(std::path::MAIN_SEPARATOR_STR),
+        Component::CurDir => std::ffi::OsStr::new("."),
+        Component::ParentDir => std::ffi::OsStr::new(".."),
+        Component::Normal(part) => part,
+    }
+}
+
 fn validate_replay_bundle_parts(
     manifest: &RunManifest,
     summary: &RunSummary,
@@ -1786,7 +2230,7 @@ mod tests {
     use trendlab_core::ledger::LedgerRow;
 
     use crate::{
-        BUNDLE_FILE_NAME, BootstrapDistributionSummary, BundleDescriptor, DateRange,
+        ArtifactError, BUNDLE_FILE_NAME, BootstrapDistributionSummary, BundleDescriptor, DateRange,
         LEDGER_FILE_NAME, MANIFEST_FILE_NAME, ManifestParameter, PersistedLedgerRow,
         RESEARCH_REPORT_FILE_NAME, ReferenceFlowDefinition, ReplayBundle, ResearchAggregateMember,
         ResearchAggregateReport, ResearchBootstrapAggregateReport,
@@ -1794,8 +2238,8 @@ mod tests {
         ResearchLeaderboardReport, ResearchLeaderboardRow, ResearchReport,
         ResearchWalkForwardReport, ResearchWalkForwardSplit, ResearchWalkForwardSplitChild,
         RunManifest, RunSummary, SCHEMA_VERSION, SUMMARY_FILE_NAME, diff_replay_bundles,
-        load_replay_bundle, load_research_report_bundle, write_json_lines, write_json_pretty,
-        write_replay_bundle, write_research_report_bundle,
+        load_replay_bundle, load_research_report_bundle, map_research_report_bundle_paths,
+        write_json_lines, write_json_pretty, write_replay_bundle, write_research_report_bundle,
     };
 
     #[test]
@@ -1881,7 +2325,10 @@ mod tests {
         let descriptor = write_replay_bundle(&bundle_dir, &manifest, &summary, &ledger).unwrap();
         let loaded = load_replay_bundle(&bundle_dir).unwrap();
 
-        assert_eq!(descriptor, BundleDescriptor::canonical());
+        assert_eq!(descriptor.manifest_path, MANIFEST_FILE_NAME);
+        assert_eq!(descriptor.summary_path, SUMMARY_FILE_NAME);
+        assert_eq!(descriptor.ledger_path, LEDGER_FILE_NAME);
+        assert!(descriptor.integrity.is_some());
         assert!(bundle_dir.join(BUNDLE_FILE_NAME).is_file());
         assert!(bundle_dir.join(MANIFEST_FILE_NAME).is_file());
         assert!(bundle_dir.join(SUMMARY_FILE_NAME).is_file());
@@ -2003,6 +2450,59 @@ mod tests {
     }
 
     #[test]
+    fn load_replay_bundle_rejects_manifest_integrity_drift() {
+        let bundle_dir = test_output_dir("artifact-integrity-mismatch");
+        let manifest = sample_manifest();
+        let summary = RunSummary {
+            row_count: 1,
+            warning_count: 1,
+            ending_cash: 1000.0,
+            ending_equity: 1000.0,
+        };
+        let ledger = vec![PersistedLedgerRow {
+            date: "2025-01-02".to_string(),
+            raw_open: 100.0,
+            raw_high: 101.0,
+            raw_low: 99.0,
+            raw_close: 100.0,
+            analysis_close: 100.0,
+            position_shares: 0,
+            signal_output: "none".to_string(),
+            filter_outcome: "not_checked".to_string(),
+            pending_order_state: "none".to_string(),
+            fill_price: None,
+            prior_stop: None,
+            next_stop: None,
+            cash: 1000.0,
+            equity: 1000.0,
+            reason_codes: vec!["hold_position".to_string()],
+        }];
+
+        write_replay_bundle(&bundle_dir, &manifest, &summary, &ledger).unwrap();
+
+        let mut tampered_manifest = manifest.clone();
+        tampered_manifest.engine_version = "tampered-reference-flow".to_string();
+        write_json_pretty(
+            &bundle_dir.join(MANIFEST_FILE_NAME),
+            &tampered_manifest,
+            "failed to write",
+        )
+        .unwrap();
+
+        let error = load_replay_bundle(&bundle_dir).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "replay bundle integrity mismatch for {} manifest",
+                bundle_dir.join(BUNDLE_FILE_NAME).display()
+            )
+        );
+
+        fs::remove_dir_all(bundle_dir).unwrap();
+    }
+
+    #[test]
     fn persisted_rows_project_back_to_core_market_bars() {
         let row = PersistedLedgerRow {
             date: "2025-01-02".to_string(),
@@ -2092,7 +2592,14 @@ mod tests {
     #[test]
     fn research_reports_round_trip_on_disk() {
         for (index, report) in sample_research_reports().into_iter().enumerate() {
-            let report_dir = test_output_dir(&format!("artifact-research-report-{index}"));
+            let root_dir = test_output_dir(&format!("artifact-research-report-{index}"));
+            let alpha_bundle_dir = root_dir.join("bundles").join("alpha");
+            let beta_bundle_dir = root_dir.join("bundles").join("beta");
+            let report_dir = root_dir.join("report");
+            write_sample_bundle(&alpha_bundle_dir, "ALPHA");
+            write_sample_bundle(&beta_bundle_dir, "BETA");
+            let report =
+                bind_sample_report_bundle_paths(&report, &alpha_bundle_dir, &beta_bundle_dir);
 
             write_research_report_bundle(&report_dir, &report).unwrap();
             let loaded = load_research_report_bundle(&report_dir).unwrap();
@@ -2187,6 +2694,109 @@ mod tests {
         fs::remove_dir_all(report_dir).unwrap();
     }
 
+    #[test]
+    fn load_research_report_rejects_missing_linked_bundle() {
+        let root_dir = test_output_dir("artifact-research-report-missing-bundle");
+        let alpha_bundle_dir = root_dir.join("bundles").join("alpha");
+        let beta_bundle_dir = root_dir.join("bundles").join("beta");
+        let report_dir = root_dir.join("report");
+        write_sample_bundle(&alpha_bundle_dir, "ALPHA");
+        write_sample_bundle(&beta_bundle_dir, "BETA");
+        let report = bind_sample_report_bundle_paths(
+            &ResearchReport::Aggregate(sample_research_aggregate_report()),
+            &alpha_bundle_dir,
+            &beta_bundle_dir,
+        );
+
+        write_research_report_bundle(&report_dir, &report).unwrap();
+        fs::remove_dir_all(&alpha_bundle_dir).unwrap();
+
+        let error = load_research_report_bundle(&report_dir).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("research report requires replay bundle")
+        );
+        assert!(
+            error
+                .to_string()
+                .contains(&alpha_bundle_dir.display().to_string())
+        );
+
+        fs::remove_dir_all(root_dir).unwrap();
+    }
+
+    #[test]
+    fn load_research_report_rejects_linked_bundle_integrity_drift() {
+        let root_dir = test_output_dir("artifact-research-report-integrity-drift");
+        let alpha_bundle_dir = root_dir.join("bundles").join("alpha");
+        let beta_bundle_dir = root_dir.join("bundles").join("beta");
+        let report_dir = root_dir.join("report");
+        write_sample_bundle(&alpha_bundle_dir, "ALPHA");
+        write_sample_bundle(&beta_bundle_dir, "BETA");
+        let report = bind_sample_report_bundle_paths(
+            &ResearchReport::Aggregate(sample_research_aggregate_report()),
+            &alpha_bundle_dir,
+            &beta_bundle_dir,
+        );
+
+        write_research_report_bundle(&report_dir, &report).unwrap();
+        let mut tampered = load_replay_bundle(&alpha_bundle_dir).unwrap();
+        tampered.manifest.engine_version = "tampered-engine-version".to_string();
+        write_replay_bundle(
+            &alpha_bundle_dir,
+            &tampered.manifest,
+            &tampered.summary,
+            &tampered.ledger,
+        )
+        .unwrap();
+
+        let error = load_research_report_bundle(&report_dir).unwrap_err();
+
+        assert!(error.to_string().contains("linked replay bundle"));
+        assert!(
+            error
+                .to_string()
+                .contains(&alpha_bundle_dir.display().to_string())
+        );
+
+        fs::remove_dir_all(root_dir).unwrap();
+    }
+
+    #[test]
+    fn load_research_report_resolves_relative_links_after_tree_move() {
+        let source_root = test_output_dir("artifact-research-report-portable-source");
+        let moved_root = test_output_dir("artifact-research-report-portable-moved");
+        let alpha_bundle_dir = source_root.join("bundles").join("alpha");
+        let beta_bundle_dir = source_root.join("bundles").join("beta");
+        let report_dir = source_root.join("report");
+        write_sample_bundle(&alpha_bundle_dir, "ALPHA");
+        write_sample_bundle(&beta_bundle_dir, "BETA");
+        let report = bind_sample_report_bundle_paths(
+            &ResearchReport::Aggregate(sample_research_aggregate_report()),
+            &alpha_bundle_dir,
+            &beta_bundle_dir,
+        );
+
+        write_research_report_bundle(&report_dir, &report).unwrap();
+        fs::rename(&source_root, &moved_root).unwrap();
+
+        let moved_report_dir = moved_root.join("report");
+        let moved_alpha_bundle_dir = moved_root.join("bundles").join("alpha");
+        let moved_beta_bundle_dir = moved_root.join("bundles").join("beta");
+        let loaded = load_research_report_bundle(&moved_report_dir).unwrap();
+        let expected = bind_sample_report_bundle_paths(
+            &ResearchReport::Aggregate(sample_research_aggregate_report()),
+            &moved_alpha_bundle_dir,
+            &moved_beta_bundle_dir,
+        );
+
+        assert_eq!(loaded, expected);
+
+        fs::remove_dir_all(moved_root).unwrap();
+    }
+
     fn sample_manifest() -> RunManifest {
         RunManifest {
             schema_version: SCHEMA_VERSION,
@@ -2266,6 +2876,59 @@ mod tests {
                 }],
             }),
         ]
+    }
+
+    fn bind_sample_report_bundle_paths(
+        report: &ResearchReport,
+        alpha_bundle_dir: &Path,
+        beta_bundle_dir: &Path,
+    ) -> ResearchReport {
+        map_research_report_bundle_paths(report, &mut |bundle_path| {
+            let bundle_name = bundle_path.to_string_lossy();
+            if bundle_name.contains("alpha-bundle") {
+                Ok(alpha_bundle_dir.to_path_buf())
+            } else if bundle_name.contains("beta-bundle") {
+                Ok(beta_bundle_dir.to_path_buf())
+            } else {
+                Err(ArtifactError::invalid(format!(
+                    "unexpected sample bundle path {}",
+                    bundle_path.display()
+                )))
+            }
+        })
+        .expect("sample report bundle paths should bind")
+    }
+
+    fn write_sample_bundle(bundle_dir: &Path, symbol: &str) {
+        let mut manifest = sample_manifest();
+        manifest.symbol_or_universe = symbol.to_string();
+        let summary = RunSummary {
+            row_count: 1,
+            warning_count: manifest.warnings.len(),
+            ending_cash: 1000.0,
+            ending_equity: 1000.0,
+        };
+        let ledger = vec![PersistedLedgerRow {
+            date: "2025-01-02".to_string(),
+            raw_open: 100.0,
+            raw_high: 101.0,
+            raw_low: 99.0,
+            raw_close: 100.0,
+            analysis_close: 100.0,
+            position_shares: 0,
+            signal_output: "none".to_string(),
+            filter_outcome: "not_checked".to_string(),
+            pending_order_state: "none".to_string(),
+            fill_price: None,
+            prior_stop: None,
+            next_stop: None,
+            cash: 1000.0,
+            equity: 1000.0,
+            reason_codes: vec!["hold_position".to_string()],
+        }];
+
+        write_replay_bundle(bundle_dir, &manifest, &summary, &ledger)
+            .expect("sample bundle should write");
     }
 
     fn sample_research_aggregate_report() -> ResearchAggregateReport {

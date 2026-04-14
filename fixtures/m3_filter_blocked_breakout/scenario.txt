@@ -1,0 +1,14 @@
+name=m3_filter_blocked_breakout
+mode=strategy_flow
+symbol=TEST
+initial_cash=1000.0
+entry_shares=1
+protective_stop_fraction=0.10
+oracle=false
+gap_policy=m1_default
+strategy.signal_id=close_confirmed_breakout
+strategy.signal_lookback_bars=3
+strategy.filter_id=fixture_block_filter
+strategy.filter_reason_code=blocked_by_fixture_filter
+strategy.position_manager_id=keep_position_manager
+strategy.execution_model_id=next_open_long

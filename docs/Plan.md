@@ -162,14 +162,55 @@ Acceptance criteria:
 - research features sit on top of a stable deterministic core
 - extra statistical layers do not obscure run provenance
 
+### M7: Trust Hardening And Operator Surface
+
+Purpose: close the remaining trust and operability gaps before scheduling new market-model breadth.
+
+Scope:
+
+- operator-facing run specs layered on top of shared and core request types
+- replay and research artifact portability plus integrity hardening
+- dedicated strategy-layer fixture and oracle coverage
+- honest live-provider smoke that executes a real provider fetch path outside default validation
+- explicit point-in-time-universe prerequisites, but not point-in-time implementation
+
+Acceptance criteria:
+
+- operators can launch runs from a higher-level spec without creating CLI-owned truth
+- replay and research artifacts fail explicitly on broken links or integrity drift
+- strategy-layer behavior is covered by deterministic audit-grade fixtures or oracles beyond unit-only coverage
+- `cargo xtask validate-live --provider tiingo` exercises a real fetch path while `cargo xtask validate` stays deterministic and network-free
+- point-in-time universes remain deferred until a stable universe snapshot and historical-membership model exists
+
+### M8: Snapshot Capture And Data Provenance
+
+Purpose: make provider-backed market data portable and reusable before any point-in-time or broader live-data expansion is scheduled.
+
+Scope:
+
+- persisted market-data snapshot capture layered on top of the existing live provider boundary
+- snapshot reopen and audit flows that stay in shared and data-layer ownership
+- operator paths that can point runs or audits at stored snapshots instead of only fixture or ad hoc live-fetch inputs
+- explicit point-in-time-universe prerequisites remain deferred until the snapshot and historical-membership model is honest enough
+
+Acceptance criteria:
+
+- live-fetched symbol history can be written and reopened through the documented snapshot ownership path without hidden provider refetches
+- stored snapshots preserve provider identity, raw bars, corporate actions, and derived normalization inputs explicitly enough for audit
+- operator-facing run or audit flows can consume stored snapshot paths without creating CLI-owned market-data truth
+- `cargo xtask validate` remains deterministic and network-free while live snapshot capture stays explicitly optional
+- point-in-time universes remain deferred until the repo has an honest universe snapshot representation plus historical-membership model
+
 ## Immediate Next Work
 
-The next implementation work should be Week 24 final M6 checkpoint and roadmap reset:
+The next implementation work should be Week 31 stored-snapshot inspect and audit flow:
 
-1. decide whether the current M6 gate is satisfied without point-in-time universes
-2. record whether point-in-time universe support remains deferred into a later milestone or becomes the next planning horizon
-3. update backlog and define the next roadmap era from the actual post-Week-23 state
-4. use the re-baselined Weeks 21-24 block in `docs/Roadmap.md` as the active checkpoint contract for the next sessions
+1. add an audit-first reopen and inspect path for persisted snapshots on top of the Week 30 `snapshot.json` plus `daily/*.jsonl` and `actions/*.jsonl` layout
+2. surface provider identity, requested window, raw-bar counts, corporate-action counts, and normalization-sensitive fields explicitly for offline inspection
+3. keep snapshot reopen and audit behavior in shared/data-layer ownership instead of CLI-local reconstruction
+4. keep normalization and resampling derived on reopen rather than persisting a second trusted normalized store
+5. keep point-in-time universes explicitly deferred until the snapshot and historical-membership prerequisites are materially closer
+6. use the Weeks 29-32 block in `docs/Roadmap.md` as the active checkpoint contract for the next sessions
 
 ## Out of Scope For Early Milestones
 
@@ -182,11 +223,11 @@ The next implementation work should be Week 24 final M6 checkpoint and roadmap r
 
 ## Remaining Open Questions
 
-- how far the Tiingo path should go beyond the current smoke-plan/config-validation boundary can be revisited once M6 research-run data volume makes a stronger live-provider path worth the complexity
-- whether derived analysis series ever need their own persisted cache can be revisited after the first M2 implementation pass
-- whether the initial strategy interfaces need richer signal metadata or exit directives should be revisited during early M6 aggregation and leaderboard work
-- whether strategy-layer scenarios want a dedicated fixture/oracle harness in addition to the current unit coverage should be revisited during early M6 research-work hardening
-- whether shared research-report bundle links should normalize to relative paths or a stricter portability rule can be revisited once more than the CLI reopens them regularly
-- whether the first shared `research.json` encoding needs richer compatibility metadata should be revisited now that the Week 23 reopen hardening pass is in place
-- whether strategy-component labels should remain standardized manifest parameters or graduate into first-class manifest fields can be revisited after the Week 24 checkpoint fixes the next planning horizon
-- whether the low-level JSON `RunRequest` input used by the CLI should become a higher-level operator-facing run spec can be revisited once the first research orchestration path is concrete
+- how far the Tiingo path should go beyond the first real `validate-live` fetch can be revisited after the post-M6 live-smoke pass lands
+- whether derived analysis series ever need their own persisted cache can be revisited if post-M6 data volume or replay cost makes recomputation materially worse
+- whether higher-timeframe strategy work needs weekly or monthly analysis open, high, and low semantics remains open
+- whether the current semantic integrity fingerprints should later grow into stronger cryptographic digests or signed artifacts remains open
+- whether the first strategy fixture and oracle harness needs richer ledger or reason fields once exit-oriented or less pass-through position-management cases land remains open
+- whether the new operator-facing run spec should later grow beyond inline or referenced request sources can be revisited once snapshot-backed operator inputs exist
+- whether strategy-component labels should remain standardized manifest parameters or eventually graduate into first-class manifest fields can be revisited if later portability or audit work exposes a concrete limitation in the current shared-manifest path
+- when point-in-time universe work returns, the repo will still need an honest universe snapshot representation and historical-membership model before it is scheduled

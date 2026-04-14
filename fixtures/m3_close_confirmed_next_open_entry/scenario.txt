@@ -1,0 +1,13 @@
+name=m3_close_confirmed_next_open_entry
+mode=strategy_flow
+symbol=TEST
+initial_cash=1000.0
+entry_shares=1
+protective_stop_fraction=0.10
+oracle=false
+gap_policy=m1_default
+strategy.signal_id=close_confirmed_breakout
+strategy.signal_lookback_bars=3
+strategy.filter_id=pass_filter
+strategy.position_manager_id=fixed_protective_stop
+strategy.execution_model_id=next_open_long

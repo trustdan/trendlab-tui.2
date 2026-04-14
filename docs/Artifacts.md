@@ -18,6 +18,19 @@ This keeps:
 
 Neither CLI nor TUI should become the sole owner of artifact parsing or versioning, including shared research-report persistence.
 
+## Market-Data Snapshot Boundary
+
+Persisted market-data snapshots are not run artifacts.
+
+They belong in `trendlab-data`, because that crate owns:
+
+- provider-facing raw types
+- stored raw bars and corporate actions
+- normalization and resampling rules
+- snapshot reopen and audit helpers
+
+`trendlab-artifact` should only reference market-data snapshots indirectly through run-manifest fields such as `snapshot_id` and `provider_identity`; it should not become the owner of snapshot schema, versioning, or provider-data reopen rules.
+
 ## Required Artifact Pieces
 
 Each persisted run should have three conceptual pieces:
@@ -100,7 +113,7 @@ Canonical layout:
 
 Encoding rules:
 
-- `bundle.json` stores artifact schema version, relative file names, and compatibility metadata.
+- `bundle.json` stores artifact schema version, relative file names, compatibility metadata, and semantic integrity fingerprints for `manifest.json`, `summary.json`, and `ledger.jsonl`.
 - `manifest.json` stores the run manifest as JSON.
 - `summary.json` stores run-summary data as JSON.
 - `ledger.jsonl` stores one persisted ledger row per line as JSON Lines.
@@ -135,9 +148,11 @@ Encoding rules:
 
 - `research.json` stores the artifact schema version and one shared `ResearchReport` payload.
 - the payload kind is one of `aggregate`, `walk_forward`, `bootstrap_aggregate`, `bootstrap_walk_forward`, or `leaderboard`
-- child replay-bundle links preserve the explicit replay-bundle paths used to build the research report
+- child replay-bundle links normalize relative to the report directory when that path can be represented portably; otherwise they fall back to absolute paths
+- reopened research reports resolve relative bundle links from the report directory instead of the caller's current working directory
+- shared research-report writes capture replay-bundle integrity fingerprints for each linked bundle
 - shared research-report writes and loads validate structural invariants instead of treating `research.json` as trusted opaque text
-- reopen surfaces must reject research reports whose linked replay bundles are missing or whose replay provenance no longer reconciles honestly with the stored summary
+- reopen surfaces must reject research reports whose linked replay bundles are missing or whose linked replay-bundle integrity no longer matches the stored metadata before provenance-specific explain checks continue
 
 Rationale:
 
@@ -150,4 +165,5 @@ Rationale:
 - artifact schema versioning is explicit
 - breaking changes require a version bump
 - loading older artifacts should be a deliberate compatibility decision, not an accident
+- older replay bundles or research reports that predate the Week 26 integrity metadata may still load through compatibility paths, but they do not get the same drift-detection guarantees until they are rewritten
 - provider-native payloads should not become the canonical replay format

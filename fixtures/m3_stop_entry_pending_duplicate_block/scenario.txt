@@ -1,0 +1,13 @@
+name=m3_stop_entry_pending_duplicate_block
+mode=strategy_flow
+symbol=TEST
+initial_cash=1000.0
+entry_shares=1
+protective_stop_fraction=0.10
+oracle=true
+gap_policy=m1_default
+strategy.signal_id=stop_entry_breakout
+strategy.signal_lookback_bars=3
+strategy.filter_id=pass_filter
+strategy.position_manager_id=keep_position_manager
+strategy.execution_model_id=stop_entry_long
