@@ -12,6 +12,8 @@ trendlab-tui.2/
     trendlab-core/
     trendlab-artifact/
     trendlab-data/
+    trendlab-operator/
+    trendlab-jobs/
     trendlab-cli/
     trendlab-tui/
     trendlab-testkit/
@@ -64,6 +66,42 @@ Owns:
 - compatibility helpers for loading older artifacts
 - artifact serialization boundaries shared by CLI and TUI
 
+### `trendlab-operator`
+
+Owns:
+
+- typed operator run spec model shared by CLI and TUI
+- operator-facing spec validation
+- run execution orchestration on top of shared core, data, and artifact boundaries
+- replay-bundle output handoff for callers that launch runs
+- bundle reopen and explain formatting helpers only when both CLI and TUI need the same presentation-neutral summary surface
+
+Must not own:
+
+- snapshot schema or snapshot versioning
+- provider-specific fetch logic or provider-native types
+- replay-bundle schema or artifact versioning
+- ratatui code
+- command-line parsing
+
+### `trendlab-jobs`
+
+Owns:
+
+- local job request types for snapshot refresh, research execution, and leaderboard refresh
+- local job status, progress, and provenance records
+- single-machine queueing and reopen helpers for background work
+- orchestration glue that composes shared data, operator, and artifact boundaries without re-owning them
+
+Must not own:
+
+- provider-specific fetch logic or provider-native types
+- snapshot schema or snapshot versioning
+- replay-bundle or research-report schema/versioning
+- simulation truth
+- ratatui code
+- command-line parsing
+
 ### `trendlab-cli`
 
 Owns:
@@ -71,6 +109,12 @@ Owns:
 - command-line entrypoints
 - explain and diff surfaces
 - user-facing command UX
+
+Must not own:
+
+- CLI-only run orchestration that would diverge from the shared operator path
+- snapshot parsing rules
+- replay-bundle schema rules
 
 ### `trendlab-tui`
 
@@ -81,6 +125,13 @@ Owns:
 - charts
 - audit panels
 - presentation state
+
+Must not own:
+
+- a second run engine
+- snapshot parsing rules
+- replay-bundle schema rules
+- provider-facing logic
 
 ### `trendlab-testkit`
 
@@ -108,15 +159,21 @@ Use this dependency direction and keep it one-way:
 
 `trendlab-artifact` -> `trendlab-core`
 
-`trendlab-cli` -> `trendlab-core`, `trendlab-artifact`, `trendlab-data`
+`trendlab-operator` -> `trendlab-core`, `trendlab-artifact`, `trendlab-data`
 
-`trendlab-tui` -> `trendlab-core`, `trendlab-artifact`, `trendlab-data`
+`trendlab-jobs` -> `trendlab-artifact`, `trendlab-data`, `trendlab-operator`
+
+`trendlab-cli` -> `trendlab-core`, `trendlab-artifact`, `trendlab-data`, `trendlab-operator`, `trendlab-jobs`
+
+`trendlab-tui` -> `trendlab-core`, `trendlab-artifact`, `trendlab-data`, `trendlab-operator`, `trendlab-jobs`
 
 `trendlab-testkit` -> `trendlab-core`, `trendlab-artifact`
 
 `xtask` -> workspace crates as needed for validation and tooling
 
 `trendlab-core` should not depend on other workspace crates.
+
+`trendlab-operator` should consume snapshot reopen and slice-selection helpers from `trendlab-data` rather than owning snapshot schema or provider-boundary rules itself.
 
 ## Directory Intent
 
@@ -175,6 +232,23 @@ Rationale:
 - snapshot reopen, load, and audit helpers should live in `trendlab-data`
 - later CLI or TUI snapshot workflows should consume those shared/data-layer helpers instead of owning snapshot parsing rules
 
+## Post-M9 Operator Boundary Decision
+
+- the first shared operator orchestration crate is `trendlab-operator`
+- `trendlab-operator` owns the typed operator run-spec boundary, validation, and run execution orchestration shared by CLI and TUI
+- `trendlab-operator` should call into `trendlab-data` for snapshot reopen and exact symbol/date slice resolution instead of re-implementing snapshot parsing rules
+- `trendlab-operator` should call into `trendlab-artifact` for replay-bundle writes and shared reopen helpers instead of becoming a second artifact boundary
+- `trendlab-cli` and `trendlab-tui` remain front-ends over the shared operator path rather than separate operator engines
+
+## Post-M13 Local Orchestration Boundary Decision
+
+- the planned shared local background-orchestration crate is `trendlab-jobs`
+- `trendlab-jobs` owns single-machine job requests, queue state, status, and provenance for snapshot refresh, research execution, and leaderboard refresh
+- `trendlab-jobs` should call into `trendlab-data` for snapshot refresh work instead of owning provider or snapshot schema rules
+- `trendlab-jobs` should call into `trendlab-operator` for snapshot-backed run and research execution handoff instead of creating a second execution engine
+- `trendlab-jobs` should call into `trendlab-artifact` only through shared artifact ownership paths instead of becoming a second artifact boundary
+- `trendlab-cli` and `trendlab-tui` remain clients of the local job boundary rather than owners of background job state
+
 ## Early Implementation Sequence
 
 1. workspace root and `xtask`
@@ -182,5 +256,6 @@ Rationale:
 3. `trendlab-artifact`
 4. `trendlab-testkit`
 5. `trendlab-data`
-6. `trendlab-cli`
-7. `trendlab-tui`
+6. `trendlab-operator`
+7. `trendlab-cli`
+8. `trendlab-tui`

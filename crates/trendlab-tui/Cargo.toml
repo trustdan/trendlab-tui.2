@@ -10,7 +10,8 @@ crossterm = "0.28.1"
 instability = "=0.3.10"
 ratatui = "0.28.1"
 trendlab-artifact = { path = "../trendlab-artifact" }
+trendlab-core = { path = "../trendlab-core" }
 trendlab-data = { path = "../trendlab-data" }
+trendlab-operator = { path = "../trendlab-operator" }
 
 [dev-dependencies]
-trendlab-core = { path = "../trendlab-core" }

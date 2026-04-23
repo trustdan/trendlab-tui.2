@@ -4,6 +4,7 @@ members = [
     "crates/trendlab-core",
     "crates/trendlab-artifact",
     "crates/trendlab-data",
+    "crates/trendlab-operator",
     "crates/trendlab-cli",
     "crates/trendlab-tui",
     "crates/trendlab-testkit",

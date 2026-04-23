@@ -1,5 +1,5 @@
 [package]
-name = "trendlab-cli"
+name = "trendlab-operator"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.91"
@@ -11,4 +11,3 @@ serde_json = "1.0.147"
 trendlab-artifact = { path = "../trendlab-artifact" }
 trendlab-core = { path = "../trendlab-core" }
 trendlab-data = { path = "../trendlab-data" }
-trendlab-operator = { path = "../trendlab-operator" }

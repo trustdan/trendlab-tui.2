@@ -597,6 +597,10 @@ pub mod engine {
 
     impl Error for SimulationError {}
 
+    pub fn validate_run_request(request: &RunRequest) -> Result<(), SimulationError> {
+        validate_request(request)
+    }
+
     pub fn run_reference_flow(request: &RunRequest) -> Result<RunResult, SimulationError> {
         validate_request(request)?;
 

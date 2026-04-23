@@ -1507,6 +1507,248 @@ pub mod audit {
     }
 }
 
+pub mod inspect {
+    use crate::DataError;
+    use crate::actions::CorporateActionEffect;
+    use crate::audit::{DataAuditFinding, audit_daily_bars};
+    use crate::normalize::normalize_symbol_history;
+    use crate::provider::ProviderIdentity;
+    use crate::resample::{ResampleFrequency, resample_symbol_history};
+    use crate::snapshot::{CorporateAction, PersistedSnapshotBundle};
+
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct SnapshotInspectionReport {
+        pub snapshot_id: String,
+        pub provider_identity: ProviderIdentity,
+        pub requested_start_date: String,
+        pub requested_end_date: String,
+        pub capture_mode: String,
+        pub entrypoint: String,
+        pub captured_at_unix_epoch_seconds: Option<u64>,
+        pub symbol_count: usize,
+        pub symbols: Vec<SymbolSnapshotInspection>,
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct SymbolSnapshotInspection {
+        pub symbol: String,
+        pub raw_bar_count: usize,
+        pub raw_start_date: Option<String>,
+        pub raw_end_date: Option<String>,
+        pub corporate_action_count: usize,
+        pub split_action_count: usize,
+        pub cash_dividend_action_count: usize,
+        pub normalized_daily_bar_count: usize,
+        pub weekly_bar_count: usize,
+        pub monthly_bar_count: usize,
+        pub analysis_adjusted_bar_count: usize,
+        pub analysis_matches_raw_close_count: usize,
+        pub max_analysis_close_gap: Option<f64>,
+        pub max_analysis_close_gap_date: Option<String>,
+        pub corporate_action_effects: Vec<CorporateActionEffect>,
+        pub findings: Vec<DataAuditFinding>,
+    }
+
+    pub fn inspect_snapshot_bundle(
+        bundle: &PersistedSnapshotBundle,
+    ) -> Result<SnapshotInspectionReport, DataError> {
+        let mut symbol_reports = Vec::with_capacity(bundle.symbols.len());
+
+        for stored in &bundle.symbols {
+            let normalized = normalize_symbol_history(stored)?;
+            let weekly = resample_symbol_history(&normalized, ResampleFrequency::Weekly)?;
+            let monthly = resample_symbol_history(&normalized, ResampleFrequency::Monthly)?;
+            let audit = audit_daily_bars(&normalized.bars);
+
+            let mut split_action_count = 0;
+            let mut cash_dividend_action_count = 0;
+            for action in &stored.corporate_actions {
+                match action {
+                    CorporateAction::Split { .. } => split_action_count += 1,
+                    CorporateAction::CashDividend { .. } => cash_dividend_action_count += 1,
+                }
+            }
+
+            symbol_reports.push(SymbolSnapshotInspection {
+                symbol: stored.symbol.clone(),
+                raw_bar_count: stored.raw_bars.len(),
+                raw_start_date: stored.raw_bars.first().map(|bar| bar.date.clone()),
+                raw_end_date: stored.raw_bars.last().map(|bar| bar.date.clone()),
+                corporate_action_count: stored.corporate_actions.len(),
+                split_action_count,
+                cash_dividend_action_count,
+                normalized_daily_bar_count: normalized.bars.len(),
+                weekly_bar_count: weekly.bars.len(),
+                monthly_bar_count: monthly.bars.len(),
+                analysis_adjusted_bar_count: audit.analysis_adjusted_bar_count,
+                analysis_matches_raw_close_count: audit.analysis_matches_raw_close_count,
+                max_analysis_close_gap: audit.max_analysis_close_gap,
+                max_analysis_close_gap_date: audit.max_analysis_close_gap_date,
+                corporate_action_effects: normalized.corporate_action_effects,
+                findings: audit.findings,
+            });
+        }
+
+        Ok(SnapshotInspectionReport {
+            snapshot_id: bundle.descriptor.snapshot_id.clone(),
+            provider_identity: bundle.descriptor.provider_identity,
+            requested_start_date: bundle.descriptor.requested_window.start_date.clone(),
+            requested_end_date: bundle.descriptor.requested_window.end_date.clone(),
+            capture_mode: bundle.descriptor.capture.capture_mode.clone(),
+            entrypoint: bundle.descriptor.capture.entrypoint.clone(),
+            captured_at_unix_epoch_seconds: bundle
+                .descriptor
+                .capture
+                .captured_at_unix_epoch_seconds,
+            symbol_count: symbol_reports.len(),
+            symbols: symbol_reports,
+        })
+    }
+}
+
+pub mod run_source {
+    use std::path::Path;
+
+    use trendlab_core::market::DailyBar;
+
+    use crate::DataError;
+    use crate::normalize::normalize_symbol_history;
+    use crate::provider::ProviderIdentity;
+    use crate::snapshot::PersistedSnapshotBundle;
+    use crate::snapshot_store::load_snapshot_bundle;
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct SnapshotRunSliceRequest {
+        pub symbol: String,
+        pub start_date: String,
+        pub end_date: String,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct SnapshotRunFormOptions {
+        pub snapshot_id: String,
+        pub provider_identity: ProviderIdentity,
+        pub symbols: Vec<SnapshotRunSymbolOptions>,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct SnapshotRunSymbolOptions {
+        pub symbol: String,
+        pub available_dates: Vec<String>,
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct ResolvedSnapshotRunSource {
+        pub snapshot_id: String,
+        pub provider_identity: ProviderIdentity,
+        pub symbol: String,
+        pub selected_start_date: String,
+        pub selected_end_date: String,
+        pub bars: Vec<DailyBar>,
+    }
+
+    pub fn resolve_snapshot_run_source(
+        snapshot_dir: &Path,
+        request: &SnapshotRunSliceRequest,
+    ) -> Result<ResolvedSnapshotRunSource, DataError> {
+        let bundle = load_snapshot_bundle(snapshot_dir)?;
+        resolve_snapshot_bundle_slice(&bundle, request)
+    }
+
+    pub fn snapshot_run_form_options(
+        bundle: &PersistedSnapshotBundle,
+    ) -> Result<SnapshotRunFormOptions, DataError> {
+        let mut symbols = Vec::with_capacity(bundle.symbols.len());
+
+        for stored in &bundle.symbols {
+            let normalized = normalize_symbol_history(stored)?;
+            symbols.push(SnapshotRunSymbolOptions {
+                symbol: normalized.symbol,
+                available_dates: normalized.bars.into_iter().map(|bar| bar.date).collect(),
+            });
+        }
+
+        symbols.sort_by(|left, right| left.symbol.cmp(&right.symbol));
+
+        Ok(SnapshotRunFormOptions {
+            snapshot_id: bundle.descriptor.snapshot_id.clone(),
+            provider_identity: bundle.descriptor.provider_identity,
+            symbols,
+        })
+    }
+
+    pub fn resolve_snapshot_bundle_slice(
+        bundle: &PersistedSnapshotBundle,
+        request: &SnapshotRunSliceRequest,
+    ) -> Result<ResolvedSnapshotRunSource, DataError> {
+        if request.symbol.trim().is_empty() {
+            return Err(DataError::invalid(
+                "snapshot run source requires a non-empty symbol",
+            ));
+        }
+
+        if request.start_date.trim().is_empty() || request.end_date.trim().is_empty() {
+            return Err(DataError::invalid(
+                "snapshot run source requires non-empty start_date and end_date",
+            ));
+        }
+
+        if request.end_date < request.start_date {
+            return Err(DataError::invalid(
+                "snapshot run source requires end_date on or after start_date",
+            ));
+        }
+
+        let stored = bundle
+            .symbols
+            .iter()
+            .find(|stored| stored.symbol == request.symbol)
+            .ok_or_else(|| {
+                DataError::invalid(format!(
+                    "snapshot `{}` does not contain symbol `{}`",
+                    bundle.descriptor.snapshot_id, request.symbol
+                ))
+            })?;
+        let normalized = normalize_symbol_history(stored)?;
+        let start_index = normalized
+            .bars
+            .iter()
+            .position(|bar| bar.date == request.start_date)
+            .ok_or_else(|| {
+                DataError::invalid(format!(
+                    "snapshot `{}` symbol `{}` does not contain start_date `{}`",
+                    bundle.descriptor.snapshot_id, request.symbol, request.start_date
+                ))
+            })?;
+        let end_index = normalized
+            .bars
+            .iter()
+            .position(|bar| bar.date == request.end_date)
+            .ok_or_else(|| {
+                DataError::invalid(format!(
+                    "snapshot `{}` symbol `{}` does not contain end_date `{}`",
+                    bundle.descriptor.snapshot_id, request.symbol, request.end_date
+                ))
+            })?;
+
+        if end_index < start_index {
+            return Err(DataError::invalid(format!(
+                "snapshot `{}` symbol `{}` has end_date `{}` before start_date `{}` in bar order",
+                bundle.descriptor.snapshot_id, request.symbol, request.end_date, request.start_date
+            )));
+        }
+
+        Ok(ResolvedSnapshotRunSource {
+            snapshot_id: bundle.descriptor.snapshot_id.clone(),
+            provider_identity: bundle.descriptor.provider_identity,
+            symbol: normalized.symbol,
+            selected_start_date: request.start_date.clone(),
+            selected_end_date: request.end_date.clone(),
+            bars: normalized.bars[start_index..=end_index].to_vec(),
+        })
+    }
+}
+
 pub mod live {
     use std::time::Duration;
 
@@ -1992,6 +2234,7 @@ mod tests {
     use crate::actions::build_corporate_action_effects;
     use crate::audit::audit_daily_bars;
     use crate::ingest::ingest_tiingo_symbol_history;
+    use crate::inspect::inspect_snapshot_bundle;
     use crate::live::{
         LiveSymbolHistoryRequest, ProviderAdapter, TIINGO_API_TOKEN_ENV, TiingoAdapter,
     };
@@ -2000,6 +2243,9 @@ mod tests {
         ProviderIdentity, TiingoCorporateAction, TiingoCorporateActionKind, TiingoDailyBar,
     };
     use crate::resample::{ResampleFrequency, resample_symbol_history};
+    use crate::run_source::{
+        SnapshotRunSliceRequest, resolve_snapshot_bundle_slice, snapshot_run_form_options,
+    };
     use crate::snapshot::{
         CorporateAction, PersistedSnapshotBundle, SnapshotBundleDescriptor,
         SnapshotCaptureMetadata, SnapshotMetadata, SnapshotRequestedWindow,
@@ -2419,6 +2665,142 @@ mod tests {
         );
 
         fs::remove_dir_all(snapshot_dir).unwrap();
+    }
+
+    #[test]
+    fn snapshot_inspection_surfaces_provider_actions_and_normalization_inputs() {
+        let bundle = sample_snapshot_bundle();
+
+        let report = inspect_snapshot_bundle(&bundle).unwrap();
+
+        assert_eq!(report.snapshot_id, "live:tiingo:TEST:2025-01-03:2025-01-08");
+        assert_eq!(report.provider_identity, ProviderIdentity::Tiingo);
+        assert_eq!(report.requested_start_date, "2025-01-02");
+        assert_eq!(report.requested_end_date, "2025-01-10");
+        assert_eq!(report.capture_mode, "live_provider_fetch");
+        assert_eq!(report.entrypoint, "cargo xtask capture-live-snapshot");
+        assert_eq!(report.symbol_count, 1);
+        assert_eq!(report.symbols.len(), 1);
+
+        let symbol = &report.symbols[0];
+        assert_eq!(symbol.symbol, "TEST");
+        assert_eq!(symbol.raw_bar_count, 4);
+        assert_eq!(symbol.raw_start_date.as_deref(), Some("2025-01-02"));
+        assert_eq!(symbol.raw_end_date.as_deref(), Some("2025-01-07"));
+        assert_eq!(symbol.corporate_action_count, 2);
+        assert_eq!(symbol.split_action_count, 1);
+        assert_eq!(symbol.cash_dividend_action_count, 1);
+        assert_eq!(symbol.normalized_daily_bar_count, 4);
+        assert_eq!(symbol.weekly_bar_count, 2);
+        assert_eq!(symbol.monthly_bar_count, 1);
+        assert_eq!(symbol.analysis_adjusted_bar_count, 2);
+        assert_eq!(symbol.analysis_matches_raw_close_count, 2);
+        assert_eq!(symbol.max_analysis_close_gap, Some(52.0));
+        assert_eq!(
+            symbol.max_analysis_close_gap_date.as_deref(),
+            Some("2025-01-03")
+        );
+        assert!(symbol.findings.is_empty());
+        assert_eq!(symbol.corporate_action_effects.len(), 2);
+        assert_eq!(symbol.corporate_action_effects[0].ex_date, "2025-01-06");
+        assert_eq!(symbol.corporate_action_effects[0].split_ratio, 2.0);
+        assert_eq!(
+            symbol.corporate_action_effects[1].cash_dividend_per_share,
+            0.25
+        );
+    }
+
+    #[test]
+    fn snapshot_run_source_resolves_exact_symbol_slice_into_canonical_bars() {
+        let bundle = sample_snapshot_bundle();
+
+        let resolved = resolve_snapshot_bundle_slice(
+            &bundle,
+            &SnapshotRunSliceRequest {
+                symbol: "TEST".to_string(),
+                start_date: "2025-01-03".to_string(),
+                end_date: "2025-01-07".to_string(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolved.snapshot_id,
+            "live:tiingo:TEST:2025-01-03:2025-01-08"
+        );
+        assert_eq!(resolved.provider_identity, ProviderIdentity::Tiingo);
+        assert_eq!(resolved.symbol, "TEST");
+        assert_eq!(resolved.selected_start_date, "2025-01-03");
+        assert_eq!(resolved.selected_end_date, "2025-01-07");
+        assert_eq!(resolved.bars.len(), 3);
+        assert_eq!(resolved.bars[0].date, "2025-01-03");
+        assert_eq!(resolved.bars[0].analysis_close, 52.0);
+        assert_eq!(resolved.bars[2].date, "2025-01-07");
+        assert_eq!(resolved.bars[2].analysis_close, 53.0);
+    }
+
+    #[test]
+    fn snapshot_run_source_rejects_missing_symbol() {
+        let bundle = sample_snapshot_bundle();
+
+        let error = resolve_snapshot_bundle_slice(
+            &bundle,
+            &SnapshotRunSliceRequest {
+                symbol: "MISSING".to_string(),
+                start_date: "2025-01-03".to_string(),
+                end_date: "2025-01-07".to_string(),
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "snapshot `live:tiingo:TEST:2025-01-03:2025-01-08` does not contain symbol `MISSING`"
+        );
+    }
+
+    #[test]
+    fn snapshot_run_source_rejects_dates_that_do_not_land_on_snapshot_bars() {
+        let bundle = sample_snapshot_bundle();
+
+        let error = resolve_snapshot_bundle_slice(
+            &bundle,
+            &SnapshotRunSliceRequest {
+                symbol: "TEST".to_string(),
+                start_date: "2025-01-04".to_string(),
+                end_date: "2025-01-07".to_string(),
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "snapshot `live:tiingo:TEST:2025-01-03:2025-01-08` symbol `TEST` does not contain start_date `2025-01-04`"
+        );
+    }
+
+    #[test]
+    fn snapshot_run_form_options_surface_exact_symbol_dates() {
+        let bundle = sample_snapshot_bundle();
+
+        let options = snapshot_run_form_options(&bundle).unwrap();
+
+        assert_eq!(
+            options.snapshot_id,
+            "live:tiingo:TEST:2025-01-03:2025-01-08"
+        );
+        assert_eq!(options.provider_identity, ProviderIdentity::Tiingo);
+        assert_eq!(options.symbols.len(), 1);
+        assert_eq!(options.symbols[0].symbol, "TEST");
+        assert_eq!(
+            options.symbols[0].available_dates,
+            vec![
+                "2025-01-02".to_string(),
+                "2025-01-03".to_string(),
+                "2025-01-06".to_string(),
+                "2025-01-07".to_string(),
+            ]
+        );
     }
 
     fn sample_metadata(name: &str) -> SnapshotMetadata {

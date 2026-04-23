@@ -62,10 +62,18 @@ When a run is produced from a componentized strategy path rather than a bare ref
 
 Current standardized parameter names:
 
+- `run_source_kind`
+- `run_request_source`
+- `run_spec_source`
+- `snapshot_source_path`
+- `snapshot_selection_start_date`
+- `snapshot_selection_end_date`
 - `strategy.signal_id`
 - `strategy.filter_id`
 - `strategy.position_manager_id`
 - `strategy.execution_model_id`
+
+For snapshot-backed runs, these parameter names are the current shared disclosure path for operator-source provenance. They do not make `trendlab-artifact` the owner of snapshot schema or snapshot reopen rules; they only preserve the operator-visible source path and selected slice alongside the manifest's snapshot identifier, provider identity, symbol, and date range.
 
 ## Universe Truth Labels
 

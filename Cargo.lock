@@ -1317,6 +1317,7 @@ dependencies = [
  "trendlab-artifact",
  "trendlab-core",
  "trendlab-data",
+ "trendlab-operator",
 ]
 
 [[package]]
@@ -1337,6 +1338,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "trendlab-operator"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "trendlab-artifact",
+ "trendlab-core",
+ "trendlab-data",
+]
+
+[[package]]
 name = "trendlab-testkit"
 version = "0.1.0"
 dependencies = [
@@ -1354,6 +1366,7 @@ dependencies = [
  "trendlab-artifact",
  "trendlab-core",
  "trendlab-data",
+ "trendlab-operator",
 ]
 
 [[package]]

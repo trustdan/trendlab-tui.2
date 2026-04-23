@@ -6,6 +6,7 @@ use std::process::{Command, ExitCode};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use trendlab_artifact::load_replay_bundle;
+use trendlab_data::inspect::inspect_snapshot_bundle;
 use trendlab_data::live::{
     LiveSymbolHistoryRequest, ProviderAdapter, TIINGO_API_TOKEN_ENV, TiingoAdapter,
 };
@@ -24,6 +25,7 @@ fn main() -> ExitCode {
         Some("validate") => validate(),
         Some("validate-live") => validate_live(args.collect()),
         Some("capture-live-snapshot") => capture_live_snapshot(args.collect()),
+        Some("inspect-snapshot") => inspect_snapshot(args.collect()),
         Some("write-fixture-bundle") => write_fixture_bundle_command(args.collect()),
         Some("inspect-ledger") => inspect_ledger(args.collect()),
         _ => usage(),
@@ -433,6 +435,99 @@ fn write_fixture_bundle_command(args: Vec<String>) -> ExitCode {
     }
 }
 
+fn inspect_snapshot(args: Vec<String>) -> ExitCode {
+    let [snapshot_dir]: [String; 1] = match args.try_into() {
+        Ok(values) => values,
+        Err(_) => {
+            eprintln!("usage: cargo xtask inspect-snapshot <snapshot-dir>");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let snapshot_dir = resolve_workspace_path(&snapshot_dir);
+    let bundle = match load_snapshot_bundle(&snapshot_dir) {
+        Ok(bundle) => bundle,
+        Err(err) => {
+            eprintln!("failed to load snapshot bundle: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let report = match inspect_snapshot_bundle(&bundle) {
+        Ok(report) => report,
+        Err(err) => {
+            eprintln!("failed to inspect snapshot bundle: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    println!("snapshot: {}", snapshot_dir.display());
+    println!("snapshot_id: {}", report.snapshot_id);
+    println!("provider: {}", report.provider_identity.as_str());
+    println!(
+        "requested_window: {}..{}",
+        report.requested_start_date, report.requested_end_date
+    );
+    println!("capture_mode: {}", report.capture_mode);
+    println!("entrypoint: {}", report.entrypoint);
+    println!(
+        "captured_at_unix_epoch_seconds: {}",
+        format_optional_u64(report.captured_at_unix_epoch_seconds)
+    );
+    println!("symbol_count: {}", report.symbol_count);
+
+    for symbol in report.symbols {
+        println!("symbol: {}", symbol.symbol);
+        println!(
+            "  raw_window: {}..{}",
+            format_optional_string(symbol.raw_start_date.as_deref()),
+            format_optional_string(symbol.raw_end_date.as_deref())
+        );
+        println!("  raw_bars: {}", symbol.raw_bar_count);
+        println!("  corporate_actions: {}", symbol.corporate_action_count);
+        println!("  split_actions: {}", symbol.split_action_count);
+        println!("  cash_dividends: {}", symbol.cash_dividend_action_count);
+        println!(
+            "  normalized_counts: daily={} weekly={} monthly={}",
+            symbol.normalized_daily_bar_count, symbol.weekly_bar_count, symbol.monthly_bar_count
+        );
+        println!(
+            "  analysis_adjustments: adjusted={} matches_raw={} max_gap={} max_gap_date={}",
+            symbol.analysis_adjusted_bar_count,
+            symbol.analysis_matches_raw_close_count,
+            format_optional_f64(symbol.max_analysis_close_gap),
+            format_optional_string(symbol.max_analysis_close_gap_date.as_deref())
+        );
+
+        if symbol.corporate_action_effects.is_empty() {
+            println!("  normalization_inputs: none");
+        } else {
+            println!("  normalization_inputs:");
+            for effect in &symbol.corporate_action_effects {
+                println!(
+                    "    {} split_ratio={:.4} cash_dividend_per_share={:.4}",
+                    effect.ex_date, effect.split_ratio, effect.cash_dividend_per_share
+                );
+            }
+        }
+
+        if symbol.findings.is_empty() {
+            println!("  audit_findings: none");
+        } else {
+            println!("  audit_findings:");
+            for finding in &symbol.findings {
+                println!(
+                    "    {} code={} detail={}",
+                    finding.date.as_deref().unwrap_or("global"),
+                    finding.code,
+                    finding.detail
+                );
+            }
+        }
+    }
+
+    ExitCode::SUCCESS
+}
+
 fn inspect_ledger(args: Vec<String>) -> ExitCode {
     let [bundle_dir]: [String; 1] = match args.try_into() {
         Ok(values) => values,
@@ -481,6 +576,21 @@ fn format_optional(value: Option<f64>) -> String {
         Some(value) => format!("{value:.4}"),
         None => "none".to_string(),
     }
+}
+
+fn format_optional_f64(value: Option<f64>) -> String {
+    format_optional(value)
+}
+
+fn format_optional_u64(value: Option<u64>) -> String {
+    match value {
+        Some(value) => value.to_string(),
+        None => "none".to_string(),
+    }
+}
+
+fn format_optional_string(value: Option<&str>) -> String {
+    value.unwrap_or("none").to_string()
 }
 
 fn format_reason_codes(reason_codes: &[String]) -> String {
@@ -532,6 +642,7 @@ fn usage() -> ExitCode {
     eprintln!(
         "  cargo xtask capture-live-snapshot --provider tiingo --output <dir> [--symbol <symbol>] [--start <YYYY-MM-DD>] [--end <YYYY-MM-DD>]"
     );
+    eprintln!("  cargo xtask inspect-snapshot <snapshot-dir>");
     eprintln!("  cargo xtask write-fixture-bundle --scenario <name> --output <dir>");
     eprintln!("  cargo xtask inspect-ledger <bundle-dir>");
     ExitCode::FAILURE

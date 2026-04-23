@@ -3,22 +3,28 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use trendlab_artifact::{
-    BootstrapDistributionSummary, DateRange, LeaderboardView, ManifestParameter,
-    PersistedLedgerRow, ReferenceFlowDefinition, ReplayBundle, ResearchAggregateMember,
-    ResearchAggregateReport, ResearchBootstrapAggregateReport, ResearchBootstrapWalkForwardReport,
+    BootstrapDistributionSummary, LeaderboardView, ManifestParameter, PersistedLedgerRow,
+    ReplayBundle, ResearchAggregateMember, ResearchAggregateReport,
+    ResearchBootstrapAggregateReport, ResearchBootstrapWalkForwardReport,
     ResearchBootstrapWalkForwardSplit, ResearchLeaderboardReport, ResearchLeaderboardRow,
     ResearchReport, ResearchWalkForwardReport, ResearchWalkForwardSplit,
-    ResearchWalkForwardSplitChild, RunManifest, RunSummary, SCHEMA_VERSION, diff_replay_bundles,
-    load_replay_bundle, load_research_report_bundle, write_replay_bundle,
-    write_research_report_bundle,
+    ResearchWalkForwardSplitChild, RunManifest, SCHEMA_VERSION, diff_replay_bundles,
+    load_replay_bundle, load_research_report_bundle, write_research_report_bundle,
 };
-use trendlab_core::engine::{RunRequest, run_reference_flow};
 use trendlab_data::audit::audit_daily_bars;
+use trendlab_data::inspect::inspect_snapshot_bundle;
 use trendlab_data::provider::ProviderIdentity;
+use trendlab_data::snapshot_store::load_snapshot_bundle;
+use trendlab_operator::{
+    RUN_REQUEST_SOURCE_PARAMETER, RUN_SOURCE_KIND_PARAMETER, RUN_SPEC_SOURCE_PARAMETER,
+    RunExecutionOptions, RunInputSource, RunSourceKind, SNAPSHOT_SELECTION_END_PARAMETER,
+    SNAPSHOT_SELECTION_START_PARAMETER, SNAPSHOT_SOURCE_PATH_PARAMETER,
+    STRATEGY_EXECUTION_PARAMETER, STRATEGY_FILTER_PARAMETER, STRATEGY_POSITION_PARAMETER,
+    STRATEGY_SIGNAL_PARAMETER, StrategyComponentLabels, execute_run,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CliResponse {
@@ -38,14 +44,6 @@ impl CliError {
             message: message.into(),
         }
     }
-
-    fn io(action: &str, path: &Path, err: &std::io::Error) -> Self {
-        Self::invalid(format!("{action} {}: {err}", path.display()))
-    }
-
-    fn json(action: &str, path: &Path, err: &serde_json::Error) -> Self {
-        Self::invalid(format!("{action} {}: {err}", path.display()))
-    }
 }
 
 impl Display for CliError {
@@ -63,81 +61,6 @@ struct RunOptions {
     provider_identity: Option<ProviderIdentity>,
     snapshot_id: Option<String>,
     engine_version: Option<String>,
-    strategy_components: Option<StrategyComponentLabels>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum RunInputSource {
-    Request(PathBuf),
-    Spec(PathBuf),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StrategyComponentLabels {
-    signal_id: String,
-    filter_id: String,
-    position_manager_id: String,
-    execution_model_id: String,
-}
-
-impl StrategyComponentLabels {
-    fn system_id(&self) -> String {
-        format!(
-            "signal={} filter={} position={} execution={}",
-            self.signal_id, self.filter_id, self.position_manager_id, self.execution_model_id
-        )
-    }
-
-    fn manifest_parameters(&self) -> [ManifestParameter; 4] {
-        [
-            ManifestParameter {
-                name: STRATEGY_SIGNAL_PARAMETER.to_string(),
-                value: self.signal_id.clone(),
-            },
-            ManifestParameter {
-                name: STRATEGY_FILTER_PARAMETER.to_string(),
-                value: self.filter_id.clone(),
-            },
-            ManifestParameter {
-                name: STRATEGY_POSITION_PARAMETER.to_string(),
-                value: self.position_manager_id.clone(),
-            },
-            ManifestParameter {
-                name: STRATEGY_EXECUTION_PARAMETER.to_string(),
-                value: self.execution_model_id.clone(),
-            },
-        ]
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct OperatorRunManifestSpec {
-    provider_identity: Option<ProviderIdentity>,
-    snapshot_id: Option<String>,
-    engine_version: Option<String>,
-    strategy_components: Option<StrategyComponentLabels>,
-}
-
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct OperatorRunSpec {
-    request_path: Option<String>,
-    request: Option<RunRequest>,
-    #[serde(default)]
-    manifest: OperatorRunManifestSpec,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct ResolvedRunInput {
-    request: RunRequest,
-    request_source: String,
-    spec_source: Option<String>,
-    default_snapshot_source: PathBuf,
-    provider_identity: ProviderIdentity,
-    snapshot_id: Option<String>,
-    engine_version: String,
     strategy_components: Option<StrategyComponentLabels>,
 }
 
@@ -228,23 +151,17 @@ struct ResearchBundleExpectation<'a> {
     historical_limitations: &'a str,
 }
 
-const DEFAULT_ENGINE_VERSION: &str = "m1-reference-flow";
 const RUN_USAGE: &str = "usage: trendlab-cli run (--request <path> [--provider <fixture|tiingo>] [--snapshot-id <id>] [--engine-version <version>] [--signal-id <id> --filter-id <id> --position-manager-id <id> --execution-model-id <id>] | --spec <path>) --output <dir>";
 const EXPLAIN_USAGE: &str = "usage: trendlab-cli explain <bundle-dir>";
 const DIFF_USAGE: &str = "usage: trendlab-cli diff <left-bundle-dir> <right-bundle-dir>";
 const AUDIT_DATA_USAGE: &str = "usage: trendlab-cli audit data <bundle-dir>";
+const AUDIT_SNAPSHOT_USAGE: &str = "usage: trendlab-cli audit snapshot <snapshot-dir>";
 const RESEARCH_AGGREGATE_USAGE: &str = "usage: trendlab-cli research aggregate [--output <dir>] <bundle-dir> <bundle-dir> [more-bundle-dirs...]";
 const RESEARCH_EXPLAIN_USAGE: &str = "usage: trendlab-cli research explain <report-dir>";
 const RESEARCH_WALK_FORWARD_USAGE: &str = "usage: trendlab-cli research walk-forward --train-bars <n> --test-bars <n> [--step-bars <n>] [--output <dir>] <bundle-dir> <bundle-dir> [more-bundle-dirs...]";
 const RESEARCH_BOOTSTRAP_AGGREGATE_USAGE: &str = "usage: trendlab-cli research bootstrap aggregate --samples <n> [--seed <n>] [--output <dir>] <bundle-dir> <bundle-dir> [more-bundle-dirs...]";
 const RESEARCH_BOOTSTRAP_WALK_FORWARD_USAGE: &str = "usage: trendlab-cli research bootstrap walk-forward --samples <n> [--seed <n>] --train-bars <n> --test-bars <n> [--step-bars <n>] [--output <dir>] <bundle-dir> <bundle-dir> [more-bundle-dirs...]";
 const RESEARCH_LEADERBOARD_USAGE: &str = "usage: trendlab-cli research leaderboard <signal|position-manager|execution-model|system> [--output <dir>] <bundle-dir> <bundle-dir> [more-bundle-dirs...]";
-const STRATEGY_SIGNAL_PARAMETER: &str = "strategy.signal_id";
-const STRATEGY_FILTER_PARAMETER: &str = "strategy.filter_id";
-const STRATEGY_POSITION_PARAMETER: &str = "strategy.position_manager_id";
-const STRATEGY_EXECUTION_PARAMETER: &str = "strategy.execution_model_id";
-const RUN_REQUEST_SOURCE_PARAMETER: &str = "run_request_source";
-const RUN_SPEC_SOURCE_PARAMETER: &str = "run_spec_source";
 
 pub fn dispatch<I, S>(args: I) -> CliResponse
 where
@@ -289,31 +206,25 @@ fn usage_response() -> CliResponse {
 
 fn run_command(args: Vec<String>) -> Result<String, CliError> {
     let options = parse_run_options(args)?;
-    let input = resolve_run_input(&options)?;
-    let result =
-        run_reference_flow(&input.request).map_err(|err| CliError::invalid(err.to_string()))?;
-    let manifest = build_manifest(&input)?;
-    let summary = RunSummary {
-        row_count: result.ledger.len(),
-        warning_count: manifest.warnings.len(),
-        ending_cash: result.cash.cash,
-        ending_equity: result.cash.equity,
-    };
-    let ledger: Vec<PersistedLedgerRow> =
-        result.ledger.iter().map(PersistedLedgerRow::from).collect();
-
-    write_replay_bundle(&options.output_dir, &manifest, &summary, &ledger)
-        .map_err(|err| CliError::invalid(err.to_string()))?;
+    let outcome = execute_run(&RunExecutionOptions {
+        input_source: options.input_source,
+        output_dir: options.output_dir,
+        provider_identity: options.provider_identity,
+        snapshot_id: options.snapshot_id,
+        engine_version: options.engine_version,
+        strategy_components: options.strategy_components,
+    })
+    .map_err(|err| CliError::invalid(err.to_string()))?;
 
     Ok(format!(
         "wrote replay bundle to {}\nsnapshot_id: {}\nsymbol: {}\nprovider: {}\nrows: {}\nending_cash: {:.4}\nending_equity: {:.4}",
-        options.output_dir.display(),
-        manifest.data_snapshot_id,
-        manifest.symbol_or_universe,
-        manifest.provider_identity,
-        summary.row_count,
-        summary.ending_cash,
-        summary.ending_equity
+        outcome.report.output_dir.display(),
+        outcome.report.snapshot_id,
+        outcome.report.symbol,
+        outcome.report.provider_identity,
+        outcome.report.row_count,
+        outcome.report.ending_cash,
+        outcome.report.ending_equity
     ))
 }
 
@@ -323,17 +234,29 @@ fn explain_command(args: Vec<String>) -> Result<String, CliError> {
         .map_err(|_| CliError::invalid(EXPLAIN_USAGE))?;
     let bundle_dir = PathBuf::from(bundle_dir);
     let bundle = load_bundle(&bundle_dir)?;
+    let run_source_kind = manifest_parameter(&bundle.manifest, RUN_SOURCE_KIND_PARAMETER)
+        .map(|parameter| parameter.value.as_str())
+        .unwrap_or("request");
     let mut lines = vec![
         format!("bundle: {}", bundle_dir.display()),
         format!("schema_version: {}", bundle.descriptor.schema_version),
         format!("engine_version: {}", bundle.manifest.engine_version),
         format!("snapshot_id: {}", bundle.manifest.data_snapshot_id),
         format!("provider: {}", bundle.manifest.provider_identity),
+        format!("run_source_kind: {run_source_kind}"),
         format!("symbol: {}", bundle.manifest.symbol_or_universe),
         format!("universe_mode: {}", bundle.manifest.universe_mode),
         format!(
             "date_range: {}..{}",
             bundle.manifest.date_range.start_date, bundle.manifest.date_range.end_date
+        ),
+        format!(
+            "request_source: {}",
+            manifest_parameter_value_or(&bundle.manifest, RUN_REQUEST_SOURCE_PARAMETER, "none")
+        ),
+        format!(
+            "spec_source: {}",
+            manifest_parameter_value_or(&bundle.manifest, RUN_SPEC_SOURCE_PARAMETER, "none")
         ),
         format!("gap_policy: {}", bundle.manifest.gap_policy.as_str()),
         format!(
@@ -348,10 +271,6 @@ fn explain_command(args: Vec<String>) -> Result<String, CliError> {
             bundle.manifest.cost_model.slippage_per_share
         ),
         format!(
-            "parameters: {}",
-            format_manifest_parameters(&bundle.manifest.parameters)
-        ),
-        format!(
             "warnings: {}",
             format_string_list(&bundle.manifest.warnings)
         ),
@@ -359,8 +278,31 @@ fn explain_command(args: Vec<String>) -> Result<String, CliError> {
         format!("warning_count: {}", bundle.summary.warning_count),
         format!("ending_cash: {:.4}", bundle.summary.ending_cash),
         format!("ending_equity: {:.4}", bundle.summary.ending_equity),
-        "ledger:".to_string(),
     ];
+
+    if run_source_kind == RunSourceKind::Snapshot.as_str() {
+        lines.push(format!(
+            "snapshot_source_path: {}",
+            manifest_parameter_value_or(&bundle.manifest, SNAPSHOT_SOURCE_PATH_PARAMETER, "none")
+        ));
+        lines.push(format!(
+            "snapshot_selection: {}..{}",
+            manifest_parameter_value_or(
+                &bundle.manifest,
+                SNAPSHOT_SELECTION_START_PARAMETER,
+                "none"
+            ),
+            manifest_parameter_value_or(&bundle.manifest, SNAPSHOT_SELECTION_END_PARAMETER, "none")
+        ));
+    }
+
+    lines.extend([
+        format!(
+            "parameters: {}",
+            format_manifest_parameters(&bundle.manifest.parameters)
+        ),
+        "ledger:".to_string(),
+    ]);
 
     for row in &bundle.ledger {
         lines.push(format!(
@@ -438,7 +380,11 @@ fn audit_command(args: Vec<String>) -> Result<String, CliError> {
 
     match iter.next().as_deref() {
         Some("data") => audit_data_command(iter.collect()),
-        _ => Err(CliError::invalid(AUDIT_DATA_USAGE)),
+        Some("snapshot") => audit_snapshot_command(iter.collect()),
+        _ => Err(CliError::invalid(format!(
+            "{}\n{}",
+            AUDIT_DATA_USAGE, AUDIT_SNAPSHOT_USAGE
+        ))),
     }
 }
 
@@ -515,6 +461,112 @@ fn audit_data_command(args: Vec<String>) -> Result<String, CliError> {
                 finding.code,
                 finding.detail
             ));
+        }
+    }
+
+    Ok(lines.join("\n"))
+}
+
+fn audit_snapshot_command(args: Vec<String>) -> Result<String, CliError> {
+    let [snapshot_dir]: [String; 1] = args
+        .try_into()
+        .map_err(|_| CliError::invalid(AUDIT_SNAPSHOT_USAGE))?;
+    let snapshot_dir = PathBuf::from(snapshot_dir);
+    let bundle = load_snapshot_bundle(&snapshot_dir).map_err(|err| {
+        CliError::invalid(format!(
+            "load snapshot bundle {}: {err}",
+            snapshot_dir.display()
+        ))
+    })?;
+    let report = inspect_snapshot_bundle(&bundle).map_err(|err| {
+        CliError::invalid(format!(
+            "inspect snapshot bundle {}: {err}",
+            snapshot_dir.display()
+        ))
+    })?;
+
+    let mut lines = vec![
+        format!("snapshot: {}", snapshot_dir.display()),
+        format!("snapshot_id: {}", report.snapshot_id),
+        format!("provider: {}", report.provider_identity.as_str()),
+        format!(
+            "requested_window: {}..{}",
+            report.requested_start_date, report.requested_end_date
+        ),
+        format!("capture_mode: {}", report.capture_mode),
+        format!("entrypoint: {}", report.entrypoint),
+        format!(
+            "captured_at_unix_epoch_seconds: {}",
+            format_optional_u64(report.captured_at_unix_epoch_seconds)
+        ),
+        format!("symbols: {}", report.symbol_count),
+    ];
+
+    for symbol in report.symbols {
+        lines.push(format!("symbol: {}", symbol.symbol));
+        lines.push(format!(
+            "raw_window: {}..{}",
+            format_optional_text(symbol.raw_start_date.as_deref()),
+            format_optional_text(symbol.raw_end_date.as_deref())
+        ));
+        lines.push(format!("raw_bars: {}", symbol.raw_bar_count));
+        lines.push(format!(
+            "corporate_actions: {}",
+            symbol.corporate_action_count
+        ));
+        lines.push(format!("split_actions: {}", symbol.split_action_count));
+        lines.push(format!(
+            "cash_dividends: {}",
+            symbol.cash_dividend_action_count
+        ));
+        lines.push(format!(
+            "normalized_bars: daily={} weekly={} monthly={}",
+            symbol.normalized_daily_bar_count, symbol.weekly_bar_count, symbol.monthly_bar_count
+        ));
+        lines.push(format!(
+            "analysis_adjusted_bars: {}",
+            symbol.analysis_adjusted_bar_count
+        ));
+        lines.push(format!(
+            "analysis_matches_raw_close: {}",
+            symbol.analysis_matches_raw_close_count
+        ));
+        lines.push(format!(
+            "max_analysis_close_gap: {}",
+            format_optional(symbol.max_analysis_close_gap)
+        ));
+        lines.push(format!(
+            "max_analysis_close_gap_date: {}",
+            format_optional_text(symbol.max_analysis_close_gap_date.as_deref())
+        ));
+
+        if symbol.corporate_action_effects.is_empty() {
+            lines.push("normalization_inputs: none".to_string());
+        } else {
+            lines.push(format!(
+                "normalization_inputs: {}",
+                symbol.corporate_action_effects.len()
+            ));
+            for effect in symbol.corporate_action_effects {
+                lines.push(format!(
+                    "normalization_input: ex_date={} split_ratio={:.4} cash_dividend_per_share={:.4}",
+                    effect.ex_date, effect.split_ratio, effect.cash_dividend_per_share
+                ));
+            }
+        }
+
+        if symbol.findings.is_empty() {
+            lines.push("findings: none".to_string());
+        } else {
+            lines.push(format!("findings: {}", symbol.findings.len()));
+            for finding in symbol.findings {
+                lines.push(format!(
+                    "finding: date={} code={} detail={}",
+                    format_optional_text(finding.date.as_deref()),
+                    finding.code,
+                    finding.detail
+                ));
+            }
         }
     }
 
@@ -2101,165 +2153,6 @@ fn parse_run_options(args: Vec<String>) -> Result<RunOptions, CliError> {
     })
 }
 
-fn read_run_request(path: &Path) -> Result<RunRequest, CliError> {
-    let raw = fs::read_to_string(path).map_err(|err| CliError::io("failed to read", path, &err))?;
-    serde_json::from_str(&raw).map_err(|err| CliError::json("failed to parse", path, &err))
-}
-
-fn read_run_spec(path: &Path) -> Result<OperatorRunSpec, CliError> {
-    let raw = fs::read_to_string(path).map_err(|err| CliError::io("failed to read", path, &err))?;
-    serde_json::from_str(&raw).map_err(|err| CliError::json("failed to parse", path, &err))
-}
-
-fn resolve_run_input(options: &RunOptions) -> Result<ResolvedRunInput, CliError> {
-    match &options.input_source {
-        RunInputSource::Request(request_path) => Ok(ResolvedRunInput {
-            request: read_run_request(request_path)?,
-            request_source: request_source_label_from_path(request_path),
-            spec_source: None,
-            default_snapshot_source: request_path.clone(),
-            provider_identity: options
-                .provider_identity
-                .unwrap_or(ProviderIdentity::Fixture),
-            snapshot_id: options.snapshot_id.clone(),
-            engine_version: options
-                .engine_version
-                .clone()
-                .unwrap_or_else(|| DEFAULT_ENGINE_VERSION.to_string()),
-            strategy_components: options.strategy_components.clone(),
-        }),
-        RunInputSource::Spec(spec_path) => resolve_run_spec_input(spec_path),
-    }
-}
-
-fn resolve_run_spec_input(spec_path: &Path) -> Result<ResolvedRunInput, CliError> {
-    let spec = read_run_spec(spec_path)?;
-    let (request, request_source, default_snapshot_source) = match (spec.request_path, spec.request)
-    {
-        (Some(request_path), None) => {
-            let resolved_request_path = resolve_spec_relative_path(spec_path, &request_path);
-            (
-                read_run_request(&resolved_request_path)?,
-                request_path,
-                resolved_request_path,
-            )
-        }
-        (None, Some(request)) => (request, "inline".to_string(), spec_path.to_path_buf()),
-        (Some(_), Some(_)) => {
-            return Err(CliError::invalid(
-                "run spec must define exactly one of `request_path` or `request`",
-            ));
-        }
-        (None, None) => {
-            return Err(CliError::invalid(
-                "run spec must include either `request_path` or `request`",
-            ));
-        }
-    };
-
-    Ok(ResolvedRunInput {
-        request,
-        request_source,
-        spec_source: Some(source_file_label(spec_path)),
-        default_snapshot_source,
-        provider_identity: spec
-            .manifest
-            .provider_identity
-            .unwrap_or(ProviderIdentity::Fixture),
-        snapshot_id: spec.manifest.snapshot_id,
-        engine_version: spec
-            .manifest
-            .engine_version
-            .unwrap_or_else(|| DEFAULT_ENGINE_VERSION.to_string()),
-        strategy_components: spec.manifest.strategy_components,
-    })
-}
-
-fn resolve_spec_relative_path(spec_path: &Path, raw_path: &str) -> PathBuf {
-    let request_path = Path::new(raw_path);
-    if request_path.is_absolute() {
-        request_path.to_path_buf()
-    } else {
-        spec_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join(request_path)
-    }
-}
-
-fn request_source_label_from_path(path: &Path) -> String {
-    source_file_label(path)
-}
-
-fn source_file_label(path: &Path) -> String {
-    path.file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("request.json")
-        .to_string()
-}
-
-fn build_manifest(input: &ResolvedRunInput) -> Result<RunManifest, CliError> {
-    let first_bar = input
-        .request
-        .bars
-        .first()
-        .ok_or_else(|| CliError::invalid("run requests must include at least one daily bar"))?;
-    let last_bar = input
-        .request
-        .bars
-        .last()
-        .ok_or_else(|| CliError::invalid("run requests must include at least one daily bar"))?;
-    let mut parameters = vec![ManifestParameter {
-        name: RUN_REQUEST_SOURCE_PARAMETER.to_string(),
-        value: input.request_source.clone(),
-    }];
-    if let Some(spec_source) = &input.spec_source {
-        parameters.push(ManifestParameter {
-            name: RUN_SPEC_SOURCE_PARAMETER.to_string(),
-            value: spec_source.clone(),
-        });
-    }
-
-    if let Some(strategy_components) = &input.strategy_components {
-        parameters.extend(strategy_components.manifest_parameters());
-    }
-
-    Ok(RunManifest {
-        schema_version: SCHEMA_VERSION,
-        engine_version: input.engine_version.clone(),
-        data_snapshot_id: input
-            .snapshot_id
-            .clone()
-            .unwrap_or_else(|| default_snapshot_id(&input.default_snapshot_source)),
-        provider_identity: input.provider_identity.as_str().to_string(),
-        symbol_or_universe: input.request.symbol.clone(),
-        universe_mode: "single_symbol".to_string(),
-        historical_limitations: Vec::new(),
-        date_range: DateRange {
-            start_date: first_bar.date.clone(),
-            end_date: last_bar.date.clone(),
-        },
-        reference_flow: ReferenceFlowDefinition {
-            kind: "m1_reference_flow".to_string(),
-            entry_shares: input.request.reference_flow.entry_shares,
-            protective_stop_fraction: input.request.reference_flow.protective_stop_fraction,
-        },
-        parameters,
-        cost_model: input.request.reference_flow.cost_model.clone(),
-        gap_policy: input.request.gap_policy,
-        seed: None,
-        warnings: Vec::new(),
-    })
-}
-
-fn default_snapshot_id(request_path: &Path) -> String {
-    request_path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .map(|value| format!("adhoc:{value}"))
-        .unwrap_or_else(|| "adhoc:request".to_string())
-}
-
 fn load_bundle(bundle_dir: &Path) -> Result<ReplayBundle, CliError> {
     load_replay_bundle(bundle_dir).map_err(|err| CliError::invalid(err.to_string()))
 }
@@ -2777,8 +2670,32 @@ fn format_optional(value: Option<f64>) -> String {
     }
 }
 
+fn format_optional_u64(value: Option<u64>) -> String {
+    match value {
+        Some(value) => value.to_string(),
+        None => "none".to_string(),
+    }
+}
+
 fn format_optional_text(value: Option<&str>) -> String {
     value.unwrap_or("none").to_string()
+}
+
+fn manifest_parameter<'a>(manifest: &'a RunManifest, name: &str) -> Option<&'a ManifestParameter> {
+    manifest
+        .parameters
+        .iter()
+        .find(|parameter| parameter.name == name)
+}
+
+fn manifest_parameter_value_or<'a>(
+    manifest: &'a RunManifest,
+    name: &str,
+    default: &'a str,
+) -> &'a str {
+    manifest_parameter(manifest, name)
+        .map(|parameter| parameter.value.as_str())
+        .unwrap_or(default)
 }
 
 fn format_f64(value: f64) -> String {
@@ -2937,12 +2854,16 @@ mod tests {
     use trendlab_core::orders::{EntryIntent, GapPolicy, OrderIntent};
     use trendlab_data::provider::ProviderIdentity;
 
-    use crate::{
-        CliResponse, DEFAULT_ENGINE_VERSION, OperatorRunManifestSpec, OperatorRunSpec,
-        RUN_REQUEST_SOURCE_PARAMETER, RUN_SPEC_SOURCE_PARAMETER, STRATEGY_EXECUTION_PARAMETER,
-        STRATEGY_FILTER_PARAMETER, STRATEGY_POSITION_PARAMETER, STRATEGY_SIGNAL_PARAMETER,
-        StrategyComponentLabels, dispatch,
+    use trendlab_operator::{
+        DEFAULT_ENGINE_VERSION, OperatorRunManifestSpec, OperatorRunRequestTemplate,
+        OperatorRunSpec, OperatorSnapshotSourceSpec, RUN_REQUEST_SOURCE_PARAMETER,
+        RUN_SOURCE_KIND_PARAMETER, RUN_SPEC_SOURCE_PARAMETER, SNAPSHOT_SELECTION_END_PARAMETER,
+        SNAPSHOT_SELECTION_START_PARAMETER, SNAPSHOT_SOURCE_PATH_PARAMETER,
+        STRATEGY_EXECUTION_PARAMETER, STRATEGY_FILTER_PARAMETER, STRATEGY_POSITION_PARAMETER,
+        STRATEGY_SIGNAL_PARAMETER, StrategyComponentLabels,
     };
+
+    use crate::{CliResponse, dispatch};
 
     #[test]
     fn run_command_writes_bundle_and_explain_surfaces_audit_rows() {
@@ -2968,18 +2889,31 @@ mod tests {
         assert_eq!(bundle.manifest.provider_identity, "fixture");
         assert_eq!(bundle.manifest.symbol_or_universe, "TEST");
         assert_eq!(bundle.summary.row_count, 2);
-        assert_eq!(bundle.manifest.parameters.len(), 1);
-        assert_eq!(bundle.manifest.parameters[0].name, "run_request_source");
-        assert_eq!(bundle.manifest.parameters[0].value, "request.json");
+        assert_eq!(bundle.manifest.parameters.len(), 2);
+        assert_eq!(
+            manifest_parameter_value(&bundle.manifest, RUN_SOURCE_KIND_PARAMETER),
+            "request"
+        );
+        assert_eq!(
+            manifest_parameter_value(&bundle.manifest, RUN_REQUEST_SOURCE_PARAMETER),
+            "request.json"
+        );
 
         let explain_response = dispatch(["explain", bundle_dir.to_str().unwrap()]);
 
         assert_eq!(explain_response.exit_code, 0, "{}", explain_response.stderr);
+        assert!(explain_response.stdout.contains("run_source_kind: request"));
         assert!(explain_response.stdout.contains("symbol: TEST"));
         assert!(
             explain_response
                 .stdout
-                .contains("parameters: run_request_source=request.json")
+                .contains("request_source: request.json")
+        );
+        assert!(explain_response.stdout.contains("spec_source: none"));
+        assert!(
+            explain_response
+                .stdout
+                .contains("parameters: run_source_kind=request|run_request_source=request.json")
         );
         assert!(explain_response.stdout.contains("warnings: none"));
         assert!(explain_response.stdout.contains("rows: 2"));
@@ -3007,6 +2941,8 @@ mod tests {
             &OperatorRunSpec {
                 request_path: None,
                 request: Some(sample_request()),
+                snapshot_source: None,
+                request_template: None,
                 manifest: OperatorRunManifestSpec {
                     provider_identity: Some(ProviderIdentity::Fixture),
                     snapshot_id: Some("snapshot:inline".to_string()),
@@ -3035,6 +2971,10 @@ mod tests {
         assert_eq!(bundle.manifest.engine_version, "m3-inline-spec");
         assert_eq!(bundle.manifest.data_snapshot_id, "snapshot:inline");
         assert_eq!(bundle.manifest.provider_identity, "fixture");
+        assert_eq!(
+            manifest_parameter_value(&bundle.manifest, RUN_SOURCE_KIND_PARAMETER),
+            "request"
+        );
         assert_eq!(
             manifest_parameter_value(&bundle.manifest, RUN_REQUEST_SOURCE_PARAMETER),
             "inline"
@@ -3076,6 +3016,8 @@ mod tests {
             &OperatorRunSpec {
                 request_path: Some("inputs/request.json".to_string()),
                 request: None,
+                snapshot_source: None,
+                request_template: None,
                 manifest: OperatorRunManifestSpec {
                     provider_identity: Some(ProviderIdentity::Fixture),
                     snapshot_id: None,
@@ -3099,6 +3041,10 @@ mod tests {
         assert_eq!(bundle.manifest.engine_version, DEFAULT_ENGINE_VERSION);
         assert_eq!(bundle.manifest.data_snapshot_id, "adhoc:request");
         assert_eq!(
+            manifest_parameter_value(&bundle.manifest, RUN_SOURCE_KIND_PARAMETER),
+            "request"
+        );
+        assert_eq!(
             manifest_parameter_value(&bundle.manifest, RUN_REQUEST_SOURCE_PARAMETER),
             "inputs/request.json"
         );
@@ -3120,6 +3066,8 @@ mod tests {
             &OperatorRunSpec {
                 request_path: None,
                 request: Some(sample_request()),
+                snapshot_source: None,
+                request_template: None,
                 manifest: OperatorRunManifestSpec::default(),
             },
         );
@@ -3141,6 +3089,237 @@ mod tests {
         );
 
         remove_dir_all_if_exists(spec_path.parent().unwrap());
+        remove_dir_all_if_exists(&bundle_dir);
+    }
+
+    #[test]
+    fn run_command_accepts_snapshot_source_spec_and_preserves_snapshot_provenance() {
+        let spec_dir = test_output_dir("cli-snapshot-spec");
+        let snapshot_dir = spec_dir.join("snapshots").join("sample");
+        let spec_path = spec_dir.join("run-spec.json");
+        let bundle_dir = test_output_dir("cli-snapshot-spec-bundle");
+        write_sample_snapshot_bundle(&snapshot_dir);
+        write_run_spec(
+            &spec_path,
+            &OperatorRunSpec {
+                request_path: None,
+                request: None,
+                snapshot_source: Some(OperatorSnapshotSourceSpec {
+                    snapshot_dir: "snapshots/sample".to_string(),
+                    symbol: "TEST".to_string(),
+                    start_date: "2025-01-03".to_string(),
+                    end_date: "2025-01-07".to_string(),
+                }),
+                request_template: Some(sample_request_template()),
+                manifest: OperatorRunManifestSpec {
+                    provider_identity: None,
+                    snapshot_id: None,
+                    engine_version: Some("m9-snapshot-spec".to_string()),
+                    strategy_components: None,
+                },
+            },
+        );
+
+        let response = dispatch([
+            "run",
+            "--spec",
+            spec_path.to_str().unwrap(),
+            "--output",
+            bundle_dir.to_str().unwrap(),
+        ]);
+
+        assert_eq!(response.exit_code, 0, "{}", response.stderr);
+
+        let bundle = load_replay_bundle(&bundle_dir).unwrap();
+        assert_eq!(bundle.manifest.engine_version, "m9-snapshot-spec");
+        assert_eq!(
+            bundle.manifest.data_snapshot_id,
+            "live:tiingo:TEST:2025-01-03:2025-01-08"
+        );
+        assert_eq!(bundle.manifest.provider_identity, "tiingo");
+        assert_eq!(bundle.manifest.symbol_or_universe, "TEST");
+        assert_eq!(bundle.manifest.date_range.start_date, "2025-01-03");
+        assert_eq!(bundle.manifest.date_range.end_date, "2025-01-07");
+        assert_eq!(bundle.summary.row_count, 3);
+        assert_eq!(
+            manifest_parameter_value(&bundle.manifest, RUN_SOURCE_KIND_PARAMETER),
+            "snapshot"
+        );
+        assert_eq!(
+            manifest_parameter_value(&bundle.manifest, RUN_REQUEST_SOURCE_PARAMETER),
+            "inline_template"
+        );
+        assert_eq!(
+            manifest_parameter_value(&bundle.manifest, RUN_SPEC_SOURCE_PARAMETER),
+            "run-spec.json"
+        );
+        assert_eq!(
+            manifest_parameter_value(&bundle.manifest, SNAPSHOT_SOURCE_PATH_PARAMETER),
+            "snapshots/sample"
+        );
+        assert_eq!(
+            manifest_parameter_value(&bundle.manifest, SNAPSHOT_SELECTION_START_PARAMETER),
+            "2025-01-03"
+        );
+        assert_eq!(
+            manifest_parameter_value(&bundle.manifest, SNAPSHOT_SELECTION_END_PARAMETER),
+            "2025-01-07"
+        );
+
+        let explain_response = dispatch(["explain", bundle_dir.to_str().unwrap()]);
+        assert_eq!(explain_response.exit_code, 0, "{}", explain_response.stderr);
+        assert!(
+            explain_response
+                .stdout
+                .contains("run_source_kind: snapshot")
+        );
+        assert!(
+            explain_response
+                .stdout
+                .contains("request_source: inline_template")
+        );
+        assert!(
+            explain_response
+                .stdout
+                .contains("spec_source: run-spec.json")
+        );
+        assert!(
+            explain_response
+                .stdout
+                .contains("snapshot_source_path: snapshots/sample")
+        );
+        assert!(
+            explain_response
+                .stdout
+                .contains("snapshot_selection: 2025-01-03..2025-01-07")
+        );
+
+        remove_dir_all_if_exists(&spec_dir);
+        remove_dir_all_if_exists(&bundle_dir);
+    }
+
+    #[test]
+    fn run_command_rejects_snapshot_spec_manifest_identity_overrides() {
+        let spec_dir = test_output_dir("cli-snapshot-spec-overrides");
+        let snapshot_dir = spec_dir.join("snapshots").join("sample");
+        let spec_path = spec_dir.join("run-spec.json");
+        let bundle_dir = test_output_dir("cli-snapshot-spec-overrides-bundle");
+        write_sample_snapshot_bundle(&snapshot_dir);
+        write_run_spec(
+            &spec_path,
+            &OperatorRunSpec {
+                request_path: None,
+                request: None,
+                snapshot_source: Some(OperatorSnapshotSourceSpec {
+                    snapshot_dir: "snapshots/sample".to_string(),
+                    symbol: "TEST".to_string(),
+                    start_date: "2025-01-03".to_string(),
+                    end_date: "2025-01-07".to_string(),
+                }),
+                request_template: Some(sample_request_template()),
+                manifest: OperatorRunManifestSpec {
+                    provider_identity: Some(ProviderIdentity::Fixture),
+                    snapshot_id: None,
+                    engine_version: None,
+                    strategy_components: None,
+                },
+            },
+        );
+
+        let response = dispatch([
+            "run",
+            "--spec",
+            spec_path.to_str().unwrap(),
+            "--output",
+            bundle_dir.to_str().unwrap(),
+        ]);
+
+        assert_eq!(response.exit_code, 1);
+        assert_eq!(
+            response.stderr,
+            "snapshot-backed run specs must not override provider_identity or snapshot_id in manifest"
+        );
+
+        remove_dir_all_if_exists(&spec_dir);
+        remove_dir_all_if_exists(&bundle_dir);
+    }
+
+    #[test]
+    fn run_command_rejects_snapshot_spec_with_empty_snapshot_dir() {
+        let spec_path = test_output_dir("cli-snapshot-empty-dir").join("run-spec.json");
+        let bundle_dir = test_output_dir("cli-snapshot-empty-dir-bundle");
+        write_run_spec(
+            &spec_path,
+            &OperatorRunSpec {
+                request_path: None,
+                request: None,
+                snapshot_source: Some(OperatorSnapshotSourceSpec {
+                    snapshot_dir: " ".to_string(),
+                    symbol: "TEST".to_string(),
+                    start_date: "2025-01-03".to_string(),
+                    end_date: "2025-01-07".to_string(),
+                }),
+                request_template: Some(sample_request_template()),
+                manifest: OperatorRunManifestSpec::default(),
+            },
+        );
+
+        let response = dispatch([
+            "run",
+            "--spec",
+            spec_path.to_str().unwrap(),
+            "--output",
+            bundle_dir.to_str().unwrap(),
+        ]);
+
+        assert_eq!(response.exit_code, 1);
+        assert_eq!(
+            response.stderr,
+            "snapshot-backed run specs require a non-empty snapshot_source.snapshot_dir"
+        );
+
+        remove_dir_all_if_exists(spec_path.parent().unwrap());
+        remove_dir_all_if_exists(&bundle_dir);
+    }
+
+    #[test]
+    fn run_command_rejects_snapshot_spec_with_empty_end_date() {
+        let spec_dir = test_output_dir("cli-snapshot-empty-end");
+        let snapshot_dir = spec_dir.join("snapshots").join("sample");
+        let spec_path = spec_dir.join("run-spec.json");
+        let bundle_dir = test_output_dir("cli-snapshot-empty-end-bundle");
+        write_sample_snapshot_bundle(&snapshot_dir);
+        write_run_spec(
+            &spec_path,
+            &OperatorRunSpec {
+                request_path: None,
+                request: None,
+                snapshot_source: Some(OperatorSnapshotSourceSpec {
+                    snapshot_dir: "snapshots/sample".to_string(),
+                    symbol: "TEST".to_string(),
+                    start_date: "2025-01-03".to_string(),
+                    end_date: " ".to_string(),
+                }),
+                request_template: Some(sample_request_template()),
+                manifest: OperatorRunManifestSpec::default(),
+            },
+        );
+
+        let response = dispatch([
+            "run",
+            "--spec",
+            spec_path.to_str().unwrap(),
+            "--output",
+            bundle_dir.to_str().unwrap(),
+        ]);
+
+        assert_eq!(response.exit_code, 1);
+        assert_eq!(
+            response.stderr,
+            "snapshot-backed run specs require a non-empty snapshot_source.end_date"
+        );
+
+        remove_dir_all_if_exists(&spec_dir);
         remove_dir_all_if_exists(&bundle_dir);
     }
 
@@ -3265,6 +3444,50 @@ mod tests {
 
         remove_dir_all_if_exists(request_path.parent().unwrap());
         remove_dir_all_if_exists(&bundle_dir);
+    }
+
+    #[test]
+    fn audit_snapshot_command_summarizes_stored_snapshot_inputs() {
+        let snapshot_dir = test_output_dir("cli-audit-snapshot");
+        write_sample_snapshot_bundle(&snapshot_dir);
+
+        let audit_response = dispatch(["audit", "snapshot", snapshot_dir.to_str().unwrap()]);
+
+        assert_eq!(audit_response.exit_code, 0, "{}", audit_response.stderr);
+        assert!(
+            audit_response
+                .stdout
+                .contains("snapshot_id: live:tiingo:TEST:2025-01-03:2025-01-08")
+        );
+        assert!(audit_response.stdout.contains("provider: tiingo"));
+        assert!(
+            audit_response
+                .stdout
+                .contains("requested_window: 2025-01-02..2025-01-10")
+        );
+        assert!(audit_response.stdout.contains("symbol: TEST"));
+        assert!(audit_response.stdout.contains("raw_bars: 4"));
+        assert!(audit_response.stdout.contains("corporate_actions: 2"));
+        assert!(audit_response.stdout.contains("split_actions: 1"));
+        assert!(audit_response.stdout.contains("cash_dividends: 1"));
+        assert!(
+            audit_response
+                .stdout
+                .contains("normalized_bars: daily=4 weekly=2 monthly=1")
+        );
+        assert!(
+            audit_response
+                .stdout
+                .contains("normalization_input: ex_date=2025-01-06 split_ratio=2.0000 cash_dividend_per_share=0.0000")
+        );
+        assert!(
+            audit_response
+                .stdout
+                .contains("normalization_input: ex_date=2025-01-07 split_ratio=1.0000 cash_dividend_per_share=0.2500")
+        );
+        assert!(audit_response.stdout.contains("findings: none"));
+
+        remove_dir_all_if_exists(&snapshot_dir);
     }
 
     #[test]
@@ -4664,6 +4887,23 @@ mod tests {
         }
     }
 
+    fn sample_request_template() -> OperatorRunRequestTemplate {
+        OperatorRunRequestTemplate {
+            entry_intents: vec![EntryIntent {
+                signal_date: "2025-01-03".to_string(),
+                intent: OrderIntent::QueueMarketEntry,
+                shares: 1,
+            }],
+            reference_flow: ReferenceFlowSpec {
+                initial_cash: 1000.0,
+                entry_shares: 1,
+                protective_stop_fraction: 0.10,
+                cost_model: CostModel::default(),
+            },
+            gap_policy: GapPolicy::M1Default,
+        }
+    }
+
     fn sample_request_with_modified_terminal_bar() -> RunRequest {
         let mut request = sample_request();
         request.bars[1].raw_close = 104.0;
@@ -4877,6 +5117,105 @@ mod tests {
     fn remove_dir_all_if_exists(path: &Path) {
         if path.exists() {
             fs::remove_dir_all(path).unwrap();
+        }
+    }
+
+    fn write_sample_snapshot_bundle(snapshot_dir: &Path) {
+        use trendlab_data::snapshot::{
+            PersistedSnapshotBundle, SnapshotBundleDescriptor, SnapshotCaptureMetadata,
+            SnapshotRequestedWindow,
+        };
+        use trendlab_data::snapshot_store::write_snapshot_bundle;
+
+        let stored = sample_stored_snapshot_symbol();
+        let descriptor = SnapshotBundleDescriptor::from_stored_symbols(
+            stored.metadata.snapshot_id.clone(),
+            stored.metadata.provider_identity,
+            SnapshotRequestedWindow {
+                start_date: "2025-01-02".to_string(),
+                end_date: "2025-01-10".to_string(),
+            },
+            SnapshotCaptureMetadata {
+                capture_mode: "live_provider_fetch".to_string(),
+                entrypoint: "cargo xtask capture-live-snapshot".to_string(),
+                captured_at_unix_epoch_seconds: Some(1_736_400_000),
+            },
+            std::slice::from_ref(&stored),
+        )
+        .unwrap();
+
+        let bundle = PersistedSnapshotBundle {
+            descriptor,
+            symbols: vec![stored],
+        };
+
+        remove_dir_all_if_exists(snapshot_dir);
+        write_snapshot_bundle(snapshot_dir, &bundle).unwrap();
+    }
+
+    fn sample_stored_snapshot_symbol() -> trendlab_data::snapshot::StoredSymbolData {
+        use trendlab_data::provider::ProviderIdentity;
+        use trendlab_data::snapshot::{
+            CorporateAction, RawDailyBar, SnapshotMetadata, StoredSymbolData,
+        };
+
+        StoredSymbolData {
+            metadata: SnapshotMetadata {
+                schema_version: trendlab_data::SNAPSHOT_SCHEMA_VERSION,
+                snapshot_id: "live:tiingo:TEST:2025-01-03:2025-01-08".to_string(),
+                provider_identity: ProviderIdentity::Tiingo,
+            },
+            symbol: "TEST".to_string(),
+            raw_bars: vec![
+                RawDailyBar {
+                    symbol: "TEST".to_string(),
+                    date: "2025-01-02".to_string(),
+                    raw_open: 100.0,
+                    raw_high: 103.0,
+                    raw_low: 99.0,
+                    raw_close: 102.0,
+                    volume: 1_000,
+                },
+                RawDailyBar {
+                    symbol: "TEST".to_string(),
+                    date: "2025-01-03".to_string(),
+                    raw_open: 104.0,
+                    raw_high: 105.0,
+                    raw_low: 101.0,
+                    raw_close: 104.0,
+                    volume: 1_100,
+                },
+                RawDailyBar {
+                    symbol: "TEST".to_string(),
+                    date: "2025-01-06".to_string(),
+                    raw_open: 52.0,
+                    raw_high: 53.0,
+                    raw_low: 50.0,
+                    raw_close: 51.0,
+                    volume: 2_200,
+                },
+                RawDailyBar {
+                    symbol: "TEST".to_string(),
+                    date: "2025-01-07".to_string(),
+                    raw_open: 52.5,
+                    raw_high: 54.0,
+                    raw_low: 52.0,
+                    raw_close: 53.0,
+                    volume: 2_100,
+                },
+            ],
+            corporate_actions: vec![
+                CorporateAction::Split {
+                    symbol: "TEST".to_string(),
+                    ex_date: "2025-01-06".to_string(),
+                    ratio: 2.0,
+                },
+                CorporateAction::CashDividend {
+                    symbol: "TEST".to_string(),
+                    ex_date: "2025-01-07".to_string(),
+                    cash_amount: 0.25,
+                },
+            ],
         }
     }
 
